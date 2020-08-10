@@ -334,33 +334,37 @@ update_cache(struct module_qstate *qstate, int id)
 	/* Step 1, general qinfo lookup */
 	struct lruhash_entry *lru_entry = slabhash_lookup(subnet_msg_cache, h,
 		&qstate->qinfo, 1);
-	int acquired_lock = (lru_entry != NULL);
+	int need_to_insert = (lru_entry == NULL);
 	if (!lru_entry) {
+		void* data = calloc(1,
+			sizeof(struct subnet_msg_cache_data));
+		if(!data) {
+			log_err("malloc failed");
+			return;
+		}
 		qinf = qstate->qinfo;
 		qinf.qname = memdup(qstate->qinfo.qname,
 			qstate->qinfo.qname_len);
 		if(!qinf.qname) {
+			free(data);
 			log_err("memdup failed");
 			return;
 		}
-		mrep_entry = query_info_entrysetup(&qinf, NULL, h);
+		mrep_entry = query_info_entrysetup(&qinf, data, h);
 		free(qinf.qname); /* if qname 'consumed', it is set to NULL */
 		if (!mrep_entry) {
+			free(data);
 			log_err("query_info_entrysetup failed");
 			return;
 		}
 		lru_entry = &mrep_entry->entry;
 		lock_rw_wrlock(&lru_entry->lock);
-		lru_entry->data = calloc(1,
-			sizeof(struct subnet_msg_cache_data));
-		if (!lru_entry->data) {
-			log_err("malloc failed");
-			return;
-		}
 	}
+	/* lru_entry->lock is locked regardless of how we got here,
+	 * either from the slabhash_lookup, or above in the new allocated */
 	/* Step 2, find the correct tree */
 	if (!(tree = get_tree(lru_entry->data, edns, sne, qstate->env->cfg))) {
-		if (acquired_lock) lock_rw_unlock(&lru_entry->lock);
+		lock_rw_unlock(&lru_entry->lock);
 		log_err("Subnet cache insertion failed");
 		return;
 	}
@@ -368,7 +372,7 @@ update_cache(struct module_qstate *qstate, int id)
 	rep = reply_info_copy(qstate->return_msg->rep, &sne->alloc, NULL);
 	lock_quick_unlock(&sne->alloc.lock);
 	if (!rep) {
-		if (acquired_lock) lock_rw_unlock(&lru_entry->lock);
+		lock_rw_unlock(&lru_entry->lock);
 		log_err("Subnet cache insertion failed");
 		return;
 	}
@@ -382,13 +386,11 @@ update_cache(struct module_qstate *qstate, int id)
 	rep->flags |= (BIT_RA | BIT_QR); /* fix flags to be sensible for */
 	rep->flags &= ~(BIT_AA | BIT_CD);/* a reply based on the cache   */
 	addrtree_insert(tree, (addrkey_t*)edns->subnet_addr, 
-		edns->subnet_source_mask, 
-		sq->ecs_server_in.subnet_scope_mask, rep,
+		edns->subnet_source_mask, sq->max_scope, rep,
 		rep->ttl, *qstate->env->now);
-	if (acquired_lock) {
-		lock_rw_unlock(&lru_entry->lock);
-	} else {
-		lock_rw_unlock(&lru_entry->lock);
+
+	lock_rw_unlock(&lru_entry->lock);
+	if (need_to_insert) {
 		slabhash_insert(subnet_msg_cache, h, lru_entry, lru_entry->data,
 			NULL);
 	}
@@ -428,7 +430,7 @@ lookup_and_reply(struct module_qstate *qstate, int id, struct subnet_qstate *sq)
 	}
 
 	qstate->return_msg = tomsg(NULL, &qstate->qinfo,
-		(struct reply_info *)node->elem, qstate->region, *env->now,
+		(struct reply_info *)node->elem, qstate->region, *env->now, 0,
 		env->scratch);
 	scope = (uint8_t)node->scope;
 	lock_rw_unlock(&e->lock);
@@ -540,7 +542,7 @@ eval_response(struct module_qstate *qstate, int id, struct subnet_qstate *sq)
 		c_out->subnet_addr_fam = c_in->subnet_addr_fam;
 		c_out->subnet_source_mask = c_in->subnet_source_mask;
 		memcpy(&c_out->subnet_addr, &c_in->subnet_addr, INET6_SIZE);
-		c_out->subnet_scope_mask = s_in->subnet_scope_mask;
+		c_out->subnet_scope_mask = sq->max_scope;
 		/* Limit scope returned to client to scope used for caching. */
 		if(c_out->subnet_addr_fam == EDNSSUBNET_ADDRFAM_IP4) {
 			if(c_out->subnet_scope_mask >
@@ -645,6 +647,19 @@ ecs_query_response(struct module_qstate* qstate, struct dns_msg* response,
 			qstate->env->cfg->client_subnet_opcode);
 		sq->subnet_sent = 0;
 		memset(&sq->ecs_server_out, 0, sizeof(sq->ecs_server_out));
+	} else if (!sq->track_max_scope &&
+		FLAGS_GET_RCODE(response->rep->flags) == LDNS_RCODE_NOERROR &&
+		response->rep->an_numrrsets > 0
+		) {
+		struct ub_packed_rrset_key* s = response->rep->rrsets[0];
+		if(ntohs(s->rk.type) == LDNS_RR_TYPE_CNAME &&
+			query_dname_compare(qstate->qinfo.qname,
+			s->rk.dname) == 0) {
+			/* CNAME response for QNAME. From now on keep track of
+			 * longest received ECS prefix for all queries on this
+			 * qstate. */
+			sq->track_max_scope = 1;
+		}
 	}
 	return 1;
 }
@@ -660,16 +675,19 @@ ecs_edns_back_parsed(struct module_qstate* qstate, int id,
 		return 1;
 	if((ecs_opt = edns_opt_list_find(
 		qstate->edns_opts_back_in,
-		qstate->env->cfg->client_subnet_opcode))) {
-		if(parse_subnet_option(ecs_opt, &sq->ecs_server_in) &&
-			sq->subnet_sent &&
-			sq->ecs_server_in.subnet_validdata)
+		qstate->env->cfg->client_subnet_opcode)) &&
+		parse_subnet_option(ecs_opt, &sq->ecs_server_in) &&
+		sq->subnet_sent && sq->ecs_server_in.subnet_validdata) {
 			/* Only skip global cache store if we sent an ECS option
 			 * and received one back. Answers from non-whitelisted
 			 * servers will end up in global cache. Answers for
 			 * queries with 0 source will not (unless nameserver
 			 * does not support ECS). */
 			qstate->no_cache_store = 1;
+			if(!sq->track_max_scope || (sq->track_max_scope &&
+				sq->ecs_server_in.subnet_scope_mask >
+				sq->max_scope))
+				sq->max_scope = sq->ecs_server_in.subnet_scope_mask;
 	}
 
 	return 1;

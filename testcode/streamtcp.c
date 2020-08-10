@@ -200,6 +200,7 @@ write_q(int fd, int udp, SSL* ssl, sldns_buffer* buf, uint16_t id,
 static void
 recv_one(int fd, int udp, SSL* ssl, sldns_buffer* buf)
 {
+	size_t i;
 	char* pktstr;
 	uint16_t len;
 	if(!udp) {
@@ -270,7 +271,13 @@ recv_one(int fd, int udp, SSL* ssl, sldns_buffer* buf)
 		len = (size_t)l;
 	}
 	printf("\nnext received packet\n");
-	log_buf(0, "data", buf);
+	printf("data[%d] ", (int)sldns_buffer_limit(buf));
+	for(i=0; i<sldns_buffer_limit(buf); i++) {
+		const char* hex = "0123456789ABCDEF";
+		printf("%c%c", hex[(sldns_buffer_read_u8_at(buf, i)&0xf0)>>4],
+                        hex[sldns_buffer_read_u8_at(buf, i)&0x0f]);
+	}
+	printf("\n");
 
 	pktstr = sldns_wire2str_pkt(sldns_buffer_begin(buf), len);
 	printf("%s", pktstr);
@@ -314,7 +321,7 @@ static int get_random(void)
 	if (RAND_bytes((unsigned char*)&r, (int)sizeof(r)) == 1) {
 		return r;
 	}
-	return arc4random();
+	return (int)arc4random();
 }
 
 /** send the TCP queries and print answers */
@@ -485,7 +492,9 @@ int main(int argc, char** argv)
 		ERR_load_SSL_strings();
 #endif
 #if OPENSSL_VERSION_NUMBER < 0x10100000 || !defined(HAVE_OPENSSL_INIT_CRYPTO)
+#  ifndef S_SPLINT_S
 		OpenSSL_add_all_algorithms();
+#  endif
 #else
 		OPENSSL_init_crypto(OPENSSL_INIT_ADD_ALL_CIPHERS
 			| OPENSSL_INIT_ADD_ALL_DIGESTS

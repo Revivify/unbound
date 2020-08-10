@@ -85,6 +85,8 @@ struct config_file {
 	int do_ip4;
 	/** do ip6 query support. */
 	int do_ip6;
+	/** prefer ip4 upstream queries. */
+	int prefer_ip4;
 	/** prefer ip6 upstream queries. */
 	int prefer_ip6;
 	/** do udp query support. */
@@ -126,6 +128,8 @@ struct config_file {
 	char* tls_ciphers;
 	/** TLS chiphersuites (TLSv1.3) */
 	char* tls_ciphersuites;
+	/** if SNI is to be used */
+	int tls_use_sni;
 
 	/** outgoing port range number of ports (per thread) */
 	int outgoing_num_ports;
@@ -186,6 +190,8 @@ struct config_file {
 	int ip_transparent;
 	/** IP_FREEBIND socket option request on port 53 sockets */
 	int ip_freebind;
+	/** IP_TOS socket option requested on port 53 sockets */
+	int ip_dscp;
 
 	/** number of interfaces to open. If 0 default all interfaces. */
 	int num_ifs;
@@ -325,10 +331,6 @@ struct config_file {
 	struct config_strlist* auto_trust_anchor_file_list;
 	/** files with trusted DNSKEYs in named.conf format, list */
 	struct config_strlist* trusted_keys_file_list;
-	/** DLV anchor file */
-	char* dlv_anchor_file;
-	/** DLV anchor inline */
-	struct config_strlist* dlv_anchor_list;
 	/** insecure domain list */
 	struct config_strlist* domain_insecure;
 	/** send key tag query */
@@ -362,6 +364,11 @@ struct config_file {
 	int serve_expired_ttl;
 	/** reset serve expired TTL after failed update attempt */
 	int serve_expired_ttl_reset;
+	/** TTL for the serve expired replies */
+	int serve_expired_reply_ttl;
+	/** serve expired entries only after trying to update the entries and this
+	 *  timeout (in milliseconds) is reached */
+	int serve_expired_client_timeout;
 	/** nsec3 maximum iterations per key size, string */
 	char* val_nsec3_key_iterations;
 	/** autotrust add holddown time, in seconds */
@@ -384,6 +391,10 @@ struct config_file {
 	struct config_str2list* local_zones;
 	/** local zones nodefault list */
 	struct config_strlist* local_zones_nodefault;
+#ifdef USE_IPSET
+	/** local zones ipset list */
+	struct config_strlist* local_zones_ipset;
+#endif
 	/** do not add any default local zone */
 	int local_zones_disable_default;
 	/** local data RRs configured */
@@ -433,7 +444,10 @@ struct config_file {
 	char* control_cert_file;
 
 	/** Python script file */
-	char* python_script;
+	struct config_strlist* python_script;
+
+	/** Dynamic library file */
+	struct config_strlist* dynlib_file;
 
 	/** Use systemd socket activation. */
 	int use_systemd;
@@ -463,8 +477,22 @@ struct config_file {
 
 	/** true to enable dnstap support */
 	int dnstap;
+	/** using bidirectional frame streams if true */
+	int dnstap_bidirectional;
 	/** dnstap socket path */
 	char* dnstap_socket_path;
+	/** dnstap IP */
+	char* dnstap_ip;
+	/** dnstap TLS enable */
+	int dnstap_tls;
+	/** dnstap tls server authentication name */
+	char* dnstap_tls_server_name;
+	/** dnstap server cert bundle */
+	char* dnstap_tls_cert_bundle;
+	/** dnstap client key for client authentication */
+	char* dnstap_tls_client_key_file;
+	/** dnstap client cert for client authentication */
+	char* dnstap_tls_client_cert_file;
 	/** true to send "identity" via dnstap */
 	int dnstap_send_identity;
 	/** true to send "version" via dnstap */
@@ -521,6 +549,9 @@ struct config_file {
 	/** SHM data - key for the shm */
 	int shm_key;
 
+	/** list of EDNS client tag entries, linked list */
+	struct config_str2list* edns_client_tags;
+
 	/** DNSCrypt */
 	/** true to enable dnscrypt */
 	int dnscrypt;
@@ -573,7 +604,15 @@ struct config_file {
 	int redis_server_port;
 	/** timeout (in ms) for communication with the redis server */
 	int redis_timeout;
+	/** set timeout on redis records based on DNS response ttl */
+	int redis_expire_records;
 #endif
+#endif
+
+	/* ipset module */
+#ifdef USE_IPSET
+	char* ipset_name_v4;
+	char* ipset_name_v6;
 #endif
 };
 
@@ -631,6 +670,21 @@ struct config_auth {
 	/** fallback to recursion to authorities if zone expired and other
 	 * reasons perhaps (like, query bogus) */
 	int fallback_enabled;
+	/** this zone is used to create local-zone policies */
+	int isrpz;
+	/** rpz tags (or NULL) */
+	uint8_t* rpz_taglist;
+	/** length of the taglist (in bytes) */
+	size_t rpz_taglistlen;
+	/** Override RPZ action for this zone, regardless of zone content */
+	char* rpz_action_override;
+	/** Log when this RPZ policy is applied */
+	int rpz_log;
+	/** Display this name in the log when RPZ policy is applied */
+	char* rpz_log_name;
+	/** Always reply with this CNAME target if the cname override action is
+	 * used */
+	char* rpz_cname;
 };
 
 /**
@@ -647,6 +701,10 @@ struct config_view {
 	struct config_strlist* local_data;
 	/** local zones nodefault list */
 	struct config_strlist* local_zones_nodefault;
+#ifdef USE_IPSET
+	/** local zones ipset list */
+	struct config_strlist* local_zones_ipset;
+#endif
 	/** Fallback to global local_zones when there is no match in the view
 	 * view specific tree. 1 for yes, 0 for no */	
 	int isfirst;
@@ -819,6 +877,14 @@ char* config_collate_cat(struct config_strlist* list);
  * on fail the item is free()ed.
  */
 int cfg_strlist_append(struct config_strlist_head* list, char* item);
+
+/**
+ * Searches the end of a string list and appends the given text.
+ * @param head: pointer to strlist head variable.
+ * @param item: new item. malloced by caller. if NULL the insertion fails.
+ * @return true on success.
+ */
+int cfg_strlist_append_ex(struct config_strlist** head, char* item);
 
 /**
  * Find string in strlist.
@@ -1021,7 +1087,7 @@ char* config_taglist2str(struct config_file* cfg, uint8_t* taglist,
  * @param list2len: length in bytes of second list.
  * @return true if there are tags in common, 0 if not.
  */
-int taglist_intersect(uint8_t* list1, size_t list1len, uint8_t* list2,
+int taglist_intersect(uint8_t* list1, size_t list1len, const uint8_t* list2,
 	size_t list2len);
 
 /**
@@ -1181,3 +1247,4 @@ void w_config_adjust_directory(struct config_file* cfg);
 extern int fake_dsa, fake_sha1;
 
 #endif /* UTIL_CONFIG_FILE_H */
+

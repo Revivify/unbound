@@ -59,7 +59,7 @@
  ******************************************************************************/
 
 /**
- * This is the default DNS64 prefix that is used whent he dns64 module is listed
+ * This is the default DNS64 prefix that is used when the dns64 module is listed
  * in module-config but when the dns64-prefix variable is not present.
  */
 static const char DEFAULT_DNS64_PREFIX[] = "64:ff9b::/96";
@@ -191,18 +191,24 @@ uitoa(unsigned n, char* s)
  *
  * \param ipv6   IPv6 address represented as a 128-bit array in big-endian
  *               order.
+ * \param ipv6_len length of the ipv6 byte array.
  * \param offset Index of the MSB of the IPv4 address embedded in the IPv6
  *               address.
  */
 static uint32_t
-extract_ipv4(const uint8_t ipv6[16], const int offset)
+extract_ipv4(const uint8_t ipv6[], size_t ipv6_len, const int offset)
 {
-    uint32_t ipv4 = (uint32_t)ipv6[offset/8+0] << (24 + (offset%8))
-                  | (uint32_t)ipv6[offset/8+1] << (16 + (offset%8))
-                  | (uint32_t)ipv6[offset/8+2] << ( 8 + (offset%8))
-                  | (uint32_t)ipv6[offset/8+3] << ( 0 + (offset%8));
-    if (offset/8+4 < 16)
-        ipv4 |= (uint32_t)ipv6[offset/8+4] >> (8 - offset%8);
+    uint32_t ipv4 = 0;
+    int i, pos;
+    log_assert(ipv6_len == 16); (void)ipv6_len;
+    log_assert(offset == 32 || offset == 40 || offset == 48 || offset == 56 ||
+        offset == 64 || offset == 96);
+    for(i = 0, pos = offset / 8; i < 4; i++, pos++) {
+        if (pos == 8)
+            pos++;
+        ipv4 = ipv4 << 8;
+        ipv4 |= ipv6[pos];
+    }
     return ipv4;
 }
 
@@ -214,22 +220,26 @@ extract_ipv4(const uint8_t ipv6[16], const int offset)
  * \param ipv4 IPv4 address represented as an unsigned 32-bit number.
  * \param ptr  The result will be written here. Must be large enough, be
  *             careful!
+ * \param nm_len length of the ptr buffer.
  *
  * \return The number of characters written.
  */
 static size_t
-ipv4_to_ptr(uint32_t ipv4, char ptr[MAX_PTR_QNAME_IPV4])
+ipv4_to_ptr(uint32_t ipv4, char ptr[], size_t nm_len)
 {
     static const char IPV4_PTR_SUFFIX[] = "\07in-addr\04arpa";
     int i;
     char* c = ptr;
+    log_assert(nm_len == MAX_PTR_QNAME_IPV4); (void)nm_len;
 
     for (i = 0; i < 4; ++i) {
         *c = uitoa((unsigned int)(ipv4 % 256), c + 1);
         c += *c + 1;
+	log_assert(c < ptr+nm_len);
         ipv4 /= 256;
     }
 
+    log_assert(c + sizeof(IPV4_PTR_SUFFIX) <= ptr+nm_len);
     memmove(c, IPV4_PTR_SUFFIX, sizeof(IPV4_PTR_SUFFIX));
 
     return c + sizeof(IPV4_PTR_SUFFIX) - ptr;
@@ -241,13 +251,15 @@ ipv4_to_ptr(uint32_t ipv4, char ptr[MAX_PTR_QNAME_IPV4])
  *
  * \param ptr  The domain name. (e.g. "\011[...]\010\012\016\012\03ip6\04arpa")
  * \param ipv6 The result will be written here, in network byte order.
+ * \param ipv6_len length of the ipv6 byte array.
  *
  * \return 1 on success, 0 on failure.
  */
 static int
-ptr_to_ipv6(const char* ptr, uint8_t ipv6[16])
+ptr_to_ipv6(const char* ptr, uint8_t ipv6[], size_t ipv6_len)
 {
     int i;
+    log_assert(ipv6_len == 16); (void)ipv6_len;
 
     for (i = 0; i < 64; i++) {
         int x;
@@ -275,24 +287,30 @@ ptr_to_ipv6(const char* ptr, uint8_t ipv6[16])
  * Synthesize an IPv6 address based on an IPv4 address and the DNS64 prefix.
  *
  * \param prefix_addr DNS64 prefix address.
+ * \param prefix_addr_len length of the prefix_addr buffer.
  * \param prefix_net  CIDR length of the DNS64 prefix. Must be between 0 and 96.
  * \param a           IPv4 address.
+ * \param a_len       length of the a buffer.
  * \param aaaa        IPv6 address. The result will be written here.
+ * \param aaaa_len    length of the aaaa buffer.
  */
 static void
-synthesize_aaaa(const uint8_t prefix_addr[16], int prefix_net,
-        const uint8_t a[4], uint8_t aaaa[16])
+synthesize_aaaa(const uint8_t prefix_addr[], size_t prefix_addr_len,
+	int prefix_net, const uint8_t a[], size_t a_len, uint8_t aaaa[],
+	size_t aaaa_len)
 {
+    size_t i;
+    int pos;
+    log_assert(prefix_addr_len == 16 && a_len == 4 && aaaa_len == 16);
+    log_assert(prefix_net == 32 || prefix_net == 40 || prefix_net == 48 ||
+        prefix_net == 56 || prefix_net == 64 || prefix_net == 96);
+    (void)prefix_addr_len; (void)a_len; (void)aaaa_len;
     memcpy(aaaa, prefix_addr, 16);
-    aaaa[prefix_net/8+0] |= a[0] >> (0+prefix_net%8);
-    aaaa[prefix_net/8+1] |= a[0] << (8-prefix_net%8);
-    aaaa[prefix_net/8+1] |= a[1] >> (0+prefix_net%8);
-    aaaa[prefix_net/8+2] |= a[1] << (8-prefix_net%8);
-    aaaa[prefix_net/8+2] |= a[2] >> (0+prefix_net%8);
-    aaaa[prefix_net/8+3] |= a[2] << (8-prefix_net%8);
-    aaaa[prefix_net/8+3] |= a[3] >> (0+prefix_net%8);
-    if (prefix_net/8+4 < 16)  /* <-- my beautiful symmetry is destroyed! */
-    aaaa[prefix_net/8+4] |= a[3] << (8-prefix_net%8);
+    for(i = 0, pos = prefix_net / 8; i < a_len; i++, pos++) {
+        if(pos == 8)
+            aaaa[pos++] = 0;
+        aaaa[pos] = a[i];
+    }
 }
 
 
@@ -348,20 +366,23 @@ static int
 dns64_apply_cfg(struct dns64_env* dns64_env, struct config_file* cfg)
 {
     struct config_strlist* s;
-    verbose(VERB_ALGO, "dns64-prefix: %s", cfg->dns64_prefix);
-    if (!netblockstrtoaddr(cfg->dns64_prefix ? cfg->dns64_prefix :
-                DEFAULT_DNS64_PREFIX, 0, &dns64_env->prefix_addr,
+    const char* dns64_prefix = cfg->dns64_prefix ?
+	cfg->dns64_prefix : DEFAULT_DNS64_PREFIX;
+    verbose(VERB_ALGO, "dns64-prefix: %s", dns64_prefix);
+    if (!netblockstrtoaddr(dns64_prefix, 0, &dns64_env->prefix_addr,
                 &dns64_env->prefix_addrlen, &dns64_env->prefix_net)) {
-        log_err("cannot parse dns64-prefix netblock: %s", cfg->dns64_prefix);
+        log_err("cannot parse dns64-prefix netblock: %s", dns64_prefix);
         return 0;
     }
     if (!addr_is_ip6(&dns64_env->prefix_addr, dns64_env->prefix_addrlen)) {
-        log_err("dns64_prefix is not IPv6: %s", cfg->dns64_prefix);
+        log_err("dns64_prefix is not IPv6: %s", dns64_prefix);
         return 0;
     }
-    if (dns64_env->prefix_net < 0 || dns64_env->prefix_net > 96) {
-        log_err("dns64-prefix length it not between 0 and 96: %s",
-                cfg->dns64_prefix);
+    if (dns64_env->prefix_net != 32 && dns64_env->prefix_net != 40 &&
+            dns64_env->prefix_net != 48 && dns64_env->prefix_net != 56 &&
+            dns64_env->prefix_net != 64 && dns64_env->prefix_net != 96 ) {
+        log_err("dns64-prefix length is not 32, 40, 48, 56, 64 or 96: %s",
+                dns64_prefix);
         return 0;
     }
     for(s = cfg->dns64_ignore_aaaa; s; s = s->next) {
@@ -447,7 +468,8 @@ handle_ipv6_ptr(struct module_qstate* qstate, int id)
     /* Convert the PTR query string to an IPv6 address. */
     memset(&sin6, 0, sizeof(sin6));
     sin6.sin6_family = AF_INET6;
-    if (!ptr_to_ipv6((char*)qstate->qinfo.qname, sin6.sin6_addr.s6_addr))
+    if (!ptr_to_ipv6((char*)qstate->qinfo.qname, sin6.sin6_addr.s6_addr,
+	sizeof(sin6.sin6_addr.s6_addr)))
         return module_wait_module;  /* Let other module handle this. */
 
     /*
@@ -470,12 +492,13 @@ handle_ipv6_ptr(struct module_qstate* qstate, int id)
     if (!(qinfo.qname = regional_alloc(qstate->region, MAX_PTR_QNAME_IPV4)))
         return module_error;
     qinfo.qname_len = ipv4_to_ptr(extract_ipv4(sin6.sin6_addr.s6_addr,
-                dns64_env->prefix_net), (char*)qinfo.qname);
+		sizeof(sin6.sin6_addr.s6_addr), dns64_env->prefix_net),
+		(char*)qinfo.qname, MAX_PTR_QNAME_IPV4);
 
     /* Create the new sub-query. */
     fptr_ok(fptr_whitelist_modenv_attach_sub(qstate->env->attach_sub));
-    if(!(*qstate->env->attach_sub)(qstate, &qinfo, qstate->query_flags, 0, 0,
-                &subq))
+    if(!(*qstate->env->attach_sub)(qstate, &qinfo, qstate->client_info,
+	    qstate->query_flags, 0, 0, &subq))
         return module_error;
     if (subq) {
         subq->curmod = id;
@@ -500,8 +523,8 @@ generate_type_A_query(struct module_qstate* qstate, int id)
 
 	/* Start the sub-query. */
 	fptr_ok(fptr_whitelist_modenv_attach_sub(qstate->env->attach_sub));
-	if(!(*qstate->env->attach_sub)(qstate, &qinfo, qstate->query_flags, 0,
-				       0, &subq))
+	if(!(*qstate->env->attach_sub)(qstate, &qinfo, qstate->client_info,
+		qstate->query_flags, 0, 0, &subq))
 	{
 		verbose(VERB_ALGO, "dns64: sub-query creation failed");
 		return module_error;
@@ -551,28 +574,29 @@ static enum module_ext_state
 handle_event_pass(struct module_qstate* qstate, int id)
 {
 	struct dns64_qstate* iq = (struct dns64_qstate*)qstate->minfo[id];
-	if (iq && iq->state == DNS64_NEW_QUERY
-            && qstate->qinfo.qtype == LDNS_RR_TYPE_PTR
-            && qstate->qinfo.qname_len == 74
-            && !strcmp((char*)&qstate->qinfo.qname[64], "\03ip6\04arpa"))
-        /* Handle PTR queries for IPv6 addresses. */
-        return handle_ipv6_ptr(qstate, id);
+	int synth_all_cfg = qstate->env->cfg->dns64_synthall;
+	int synth_qname = 0;
 
-	if (qstate->env->cfg->dns64_synthall &&
-	    iq && iq->state == DNS64_NEW_QUERY
-	    && qstate->qinfo.qtype == LDNS_RR_TYPE_AAAA)
-		return generate_type_A_query(qstate, id);
+	if(iq && iq->state == DNS64_NEW_QUERY
+		&& qstate->qinfo.qtype == LDNS_RR_TYPE_PTR
+		&& qstate->qinfo.qname_len == 74
+		&& !strcmp((char*)&qstate->qinfo.qname[64], "\03ip6\04arpa")) {
+		/* Handle PTR queries for IPv6 addresses. */
+		return handle_ipv6_ptr(qstate, id);
+	}
 
-	if(dns64_always_synth_for_qname(qstate, id) &&
-	    iq && iq->state == DNS64_NEW_QUERY
-	    && !(qstate->query_flags & BIT_CD)
-	    && qstate->qinfo.qtype == LDNS_RR_TYPE_AAAA) {
-		verbose(VERB_ALGO, "dns64: ignore-aaaa and synthesize anyway");
+	if(iq && iq->state == DNS64_NEW_QUERY &&
+		qstate->qinfo.qtype == LDNS_RR_TYPE_AAAA &&
+		(synth_all_cfg ||
+		(synth_qname=(dns64_always_synth_for_qname(qstate, id)
+			&& !(qstate->query_flags & BIT_CD))))) {
+		if(synth_qname)
+			verbose(VERB_ALGO, "dns64: ignore-aaaa and synthesize anyway");
 		return generate_type_A_query(qstate, id);
 	}
 
 	/* We are finished when our sub-query is finished. */
-	if (iq && iq->state == DNS64_SUBQUERY_FINISHED)
+	if(iq && iq->state == DNS64_SUBQUERY_FINISHED)
 		return module_finished;
 
 	/* Otherwise, pass request to next module. */
@@ -605,32 +629,47 @@ handle_event_moddone(struct module_qstate* qstate, int id)
      *        synthesize in (sec 5.1.2 of RFC6147).
      *   - A successful AAAA query with an answer.
      */
-	if((!iq || iq->state != DNS64_INTERNAL_QUERY)
-            && qstate->qinfo.qtype == LDNS_RR_TYPE_AAAA
-	    && !(qstate->query_flags & BIT_CD)
-	    && !(qstate->return_msg &&
-		    qstate->return_msg->rep &&
-		    reply_find_answer_rrset(&qstate->qinfo,
-			    qstate->return_msg->rep)))
-		/* not internal, type AAAA, not CD, and no answer RRset,
-		 * So, this is a AAAA noerror/nodata answer */
-		return generate_type_A_query(qstate, id);
 
-	if((!iq || iq->state != DNS64_INTERNAL_QUERY)
-	    && qstate->qinfo.qtype == LDNS_RR_TYPE_AAAA
-	    && !(qstate->query_flags & BIT_CD)
-	    && dns64_always_synth_for_qname(qstate, id)) {
-		/* if it is not internal, AAAA, not CD and listed domain,
-		 * generate from A record and ignore AAAA */
-		verbose(VERB_ALGO, "dns64: ignore-aaaa and synthesize anyway");
+	/* When an AAAA query completes check if we want to perform DNS64
+	 * synthesis. We skip queries with DNSSEC enabled (!CD) and
+	 * ones generated by us to retrieve the A/PTR record to use for
+	 * synth. */
+	int could_synth =
+		qstate->qinfo.qtype == LDNS_RR_TYPE_AAAA &&
+		(!iq || iq->state != DNS64_INTERNAL_QUERY) &&
+		!(qstate->query_flags & BIT_CD);
+	int has_data = /* whether query returned non-empty rrset */
+		qstate->return_msg &&
+		qstate->return_msg->rep &&
+		reply_find_answer_rrset(&qstate->qinfo, qstate->return_msg->rep);
+	int synth_qname = 0;
+	if(could_synth && !has_data && qstate->env->need_to_validate &&
+		qstate->return_msg && qstate->return_msg->rep &&
+		qstate->return_msg->rep->security == sec_status_bogus) {
+		verbose(VERB_ALGO, "dns64: bogus AAAA reply not synthesized");
+		could_synth = 0;
+	}
+
+	if(could_synth &&
+		(!has_data ||
+		(synth_qname=dns64_always_synth_for_qname(qstate, id)))) {
+		if(synth_qname)
+			verbose(VERB_ALGO, "dns64: ignore-aaaa and synthesize anyway");
 		return generate_type_A_query(qstate, id);
 	}
 
 	/* Store the response in cache. */
-	if ( (!iq || !iq->started_no_cache_store) &&
-		qstate->return_msg && qstate->return_msg->rep &&
-		!dns_cache_store(qstate->env, &qstate->qinfo, qstate->return_msg->rep,
-		0, 0, 0, NULL, qstate->query_flags))
+	if( (!iq || !iq->started_no_cache_store) &&
+		!qstate->rpz_applied && !qstate->rpz_passthru &&
+		!qstate->is_subnet_answer &&
+		qstate->return_msg &&
+		qstate->return_msg->rep &&
+		!qstate->fwd_stub_no_cache &&
+		!dns_cache_store(
+			qstate->env, &qstate->qinfo, qstate->return_msg->rep,
+			0, qstate->prefetch_leeway, 0, NULL,
+			qstate->query_flags, qstate->qstarttime,
+			qstate->is_valrec))
 		log_err("out of memory");
 
 	/* do nothing */
@@ -663,12 +702,17 @@ dns64_operate(struct module_qstate* qstate, enum module_ev event, int id,
 	switch(event) {
 		case module_event_new:
 			/* Tag this query as being new and fall through. */
-			iq = (struct dns64_qstate*)regional_alloc(
-				qstate->region, sizeof(*iq));
+			if (!(iq = (struct dns64_qstate*)regional_alloc(
+				qstate->region, sizeof(*iq)))) {
+				log_err("out of memory");
+				qstate->ext_state[id] = module_error;
+				return;
+			}
 			qstate->minfo[id] = iq;
 			iq->state = DNS64_NEW_QUERY;
 			iq->started_no_cache_store = qstate->no_cache_store;
 			qstate->no_cache_store = 1;
+			ATTR_FALLTHROUGH
   			/* fallthrough */
 		case module_event_pass:
 			qstate->ext_state[id] = handle_event_pass(qstate, id);
@@ -682,8 +726,15 @@ dns64_operate(struct module_qstate* qstate, enum module_ev event, int id,
 	}
 	if(qstate->ext_state[id] == module_finished) {
 		iq = (struct dns64_qstate*)qstate->minfo[id];
-		if(iq && iq->state != DNS64_INTERNAL_QUERY)
-			qstate->no_cache_store = iq->started_no_cache_store;
+		if(iq && iq->state != DNS64_INTERNAL_QUERY) {
+			if(qstate->fwd_stub_no_cache) {
+				/* If the forward/stub has no cache, then
+				 * continue with the query with no cache. */
+				qstate->no_cache_store = qstate->fwd_stub_no_cache;
+			} else {
+				qstate->no_cache_store = iq->started_no_cache_store;
+			}
+		}
 	}
 }
 
@@ -705,7 +756,7 @@ dns64_synth_aaaa_data(const struct ub_packed_rrset_key* fk,
 		*dd_out = NULL;
 		return; /* integer overflow protection in alloc */
 	}
-	if (!(dd = *dd_out = regional_alloc(region,
+	if (!(dd = *dd_out = regional_alloc_zero(region,
 		  sizeof(struct packed_rrset_data)
 		  + fd->count * (sizeof(size_t) + sizeof(time_t) +
 			     sizeof(uint8_t*) + 2 + 16)))) {
@@ -740,8 +791,10 @@ dns64_synth_aaaa_data(const struct ub_packed_rrset_key* fk,
 		dd->rr_data[i][1] = 16;
 		synthesize_aaaa(
 				((struct sockaddr_in6*)&dns64_env->prefix_addr)->sin6_addr.s6_addr,
+				sizeof(((struct sockaddr_in6*)&dns64_env->prefix_addr)->sin6_addr.s6_addr),
 				dns64_env->prefix_net, &fd->rr_data[i][2],
-				&dd->rr_data[i][2] );
+				fd->rr_len[i]-2, &dd->rr_data[i][2],
+				dd->rr_len[i]-2);
 		dd->rr_ttl[i] = fd->rr_ttl[i];
 	}
 
@@ -788,6 +841,7 @@ dns64_adjust_a(int id, struct module_qstate* super, struct module_qstate* qstate
 	size_t i, s;
 	struct packed_rrset_data* fd, *dd;
 	struct ub_packed_rrset_key* fk, *dk;
+	int allocated_return_msg = 0;
 
 	verbose(VERB_ALGO, "converting A answers to AAAA answers");
 
@@ -803,6 +857,7 @@ dns64_adjust_a(int id, struct module_qstate* super, struct module_qstate* qstate
 			return;
 		memset(super->return_msg, 0, sizeof(*super->return_msg));
 		super->return_msg->qinfo = super->qinfo;
+		allocated_return_msg = 1;
 	}
 
 	rep = qstate->return_msg->rep;
@@ -812,13 +867,17 @@ dns64_adjust_a(int id, struct module_qstate* super, struct module_qstate* qstate
 	 */
 	cp = construct_reply_info_base(super->region, rep->flags, rep->qdcount,
 		rep->ttl, rep->prefetch_ttl, rep->serve_expired_ttl,
+		rep->serve_expired_norec_ttl,
 		rep->an_numrrsets, rep->ns_numrrsets, rep->ar_numrrsets,
-		rep->rrset_count, rep->security);
-	if(!cp)
+		rep->rrset_count, rep->security, LDNS_EDE_NONE);
+	if(!cp) {
+		if(allocated_return_msg) super->return_msg = NULL;
 		return;
+	}
 
 	/* allocate ub_key structures special or not */
 	if(!reply_info_alloc_rrset_keys(cp, NULL, super->region)) {
+		if(allocated_return_msg) super->return_msg = NULL;
 		return;
 	}
 
@@ -833,8 +892,10 @@ dns64_adjust_a(int id, struct module_qstate* super, struct module_qstate* qstate
 		if(i<rep->an_numrrsets && fk->rk.type == htons(LDNS_RR_TYPE_A)) {
 			/* also sets dk->entry.hash */
 			dns64_synth_aaaa_data(fk, fd, dk, &dd, super->region, dns64_env);
-			if(!dd)
+			if(!dd) {
+				if(allocated_return_msg) super->return_msg = NULL;
 				return;
+			}
 			/* Delete negative AAAA record from cache stored by
 			 * the iterator module */
 			rrset_cache_remove(super->env->rrset_cache, dk->rk.dname, 
@@ -851,15 +912,19 @@ dns64_adjust_a(int id, struct module_qstate* super, struct module_qstate* qstate
 			dk->rk.dname = (uint8_t*)regional_alloc_init(super->region,
 				fk->rk.dname, fk->rk.dname_len);
 
-			if(!dk->rk.dname)
+			if(!dk->rk.dname) {
+				if(allocated_return_msg) super->return_msg = NULL;
 				return;
+			}
 
 			s = packed_rrset_sizeof(fd);
 			dd = (struct packed_rrset_data*)regional_alloc_init(
 				super->region, fd, s);
 
-			if(!dd)
+			if(!dd) {
+				if(allocated_return_msg) super->return_msg = NULL;
 				return;
+			}
 		}
 
 		packed_rrset_ptr_fixup(dd);
@@ -889,8 +954,11 @@ dns64_adjust_ptr(struct module_qstate* qstate, struct module_qstate* super)
                     sizeof(struct dns_msg))))
         return;
     super->return_msg->qinfo = super->qinfo;
-    super->return_msg->rep = reply_info_copy(qstate->return_msg->rep, NULL,
-            super->region);
+    if (!(super->return_msg->rep = reply_info_copy(qstate->return_msg->rep,
+                    NULL, super->region))) {
+	super->return_msg = NULL;
+        return;
+    }
 
     /*
      * Adjust the domain name of the answer RR set so that it matches the
@@ -928,22 +996,52 @@ dns64_inform_super(struct module_qstate* qstate, int id,
 	if(!super_dq) {
 		super_dq = (struct dns64_qstate*)regional_alloc(super->region,
 			sizeof(*super_dq));
+		if(!super_dq) {
+			log_err("out of memory");
+			super->return_rcode = LDNS_RCODE_SERVFAIL;
+			super->return_msg = NULL;
+			return;
+		}
 		super->minfo[id] = super_dq;
 		memset(super_dq, 0, sizeof(*super_dq));
 		super_dq->started_no_cache_store = super->no_cache_store;
 	}
 	super_dq->state = DNS64_SUBQUERY_FINISHED;
 
-	/* If there is no successful answer, we're done. */
-	if (qstate->return_rcode != LDNS_RCODE_NOERROR
-	    || !qstate->return_msg
-	    || !qstate->return_msg->rep) {
+	/* If there is no successful answer, we're done.
+	 * Guarantee that we have at least a NOERROR reply further on. */
+	if(qstate->return_rcode != LDNS_RCODE_NOERROR
+		|| !qstate->return_msg
+		|| !qstate->return_msg->rep) {
+		return;
+	}
+
+	/* When no A record is found for synthesis fall back to AAAA again. */
+	if(qstate->qinfo.qtype == LDNS_RR_TYPE_A &&
+		!reply_find_answer_rrset(&qstate->qinfo,
+			qstate->return_msg->rep)) {
+		super_dq->state = DNS64_INTERNAL_QUERY;
 		return;
 	}
 
 	/* Use return code from A query in response to client. */
 	if (super->return_rcode != LDNS_RCODE_NOERROR)
 		super->return_rcode = qstate->return_rcode;
+	/* RPZ applied to the subquery need to then change (not cache)
+	 * the super query. With the super query not cached, it is
+	 * going to run the state machine modules on incoming queries,
+	 * that fetch the subquery (cache) response, and modify it
+	 * according to the rpz policy. That makes the synthesized
+	 * super query also adjusted by rpz policies. But loses cache
+	 * hits. Even though the subquery likely is answered from cache,
+	 * internally in its state machine process. */
+	if(qstate->rpz_applied)
+		super->rpz_applied = 1;
+	if(qstate->rpz_passthru)
+		super->rpz_passthru = 1;
+
+	/* Since the super qstate has a new response, its errinf is removed. */
+	super->errinf = NULL;
 
 	/* Generate a response suitable for the original query. */
 	if (qstate->qinfo.qtype == LDNS_RR_TYPE_A) {
@@ -952,11 +1050,19 @@ dns64_inform_super(struct module_qstate* qstate, int id,
 		log_assert(qstate->qinfo.qtype == LDNS_RR_TYPE_PTR);
 		dns64_adjust_ptr(qstate, super);
 	}
+	/* If the sub-query has no cache store, then also the super query. */
+	if(qstate->fwd_stub_no_cache)
+		super->fwd_stub_no_cache = 1;
 
 	/* Store the generated response in cache. */
-	if ( (!super_dq || !super_dq->started_no_cache_store) &&
+	if ( super->return_msg && super->return_msg->rep &&
+		(!super_dq || !super_dq->started_no_cache_store) &&
+		!qstate->fwd_stub_no_cache &&
+		!super->rpz_applied && !super->rpz_passthru &&
+		!super->is_subnet_answer &&
 		!dns_cache_store(super->env, &super->qinfo, super->return_msg->rep,
-		0, 0, 0, NULL, super->query_flags))
+		0, super->prefetch_leeway, 0, NULL, super->query_flags,
+		qstate->qstarttime, qstate->is_valrec))
 		log_err("out of memory");
 }
 
@@ -994,8 +1100,8 @@ dns64_get_mem(struct module_env* env, int id)
  */
 static struct module_func_block dns64_block = {
 	"dns64",
-	&dns64_init, &dns64_deinit, &dns64_operate, &dns64_inform_super,
-	&dns64_clear, &dns64_get_mem
+	NULL, NULL, &dns64_init, &dns64_deinit, &dns64_operate,
+	&dns64_inform_super, &dns64_clear, &dns64_get_mem
 };
 
 /**

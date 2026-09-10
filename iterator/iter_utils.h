@@ -59,6 +59,18 @@ struct reply_info;
 struct module_qstate;
 struct sock_list;
 struct ub_packed_rrset_key;
+struct module_stack;
+struct outside_network;
+struct iter_nat64;
+
+/* max number of lookups in the cache for target nameserver names.
+ * This stops, for large delegations, N*N lookups in the cache. */
+#define ITERATOR_NAME_CACHELOOKUP_MAX	3
+/* max number of lookups in the cache for parentside glue for nameserver names
+ * This stops, for larger delegations, N*N lookups in the cache.
+ * It is a little larger than the nonpside max, so it allows a couple extra
+ * lookups of parent side glue. */
+#define ITERATOR_NAME_CACHELOOKUP_MAX_PSIDE	5
 
 /**
  * Process config options and set iterator module state.
@@ -72,6 +84,7 @@ int iter_apply_cfg(struct iter_env* iter_env, struct config_file* cfg);
 /**
  * Select a valid, nice target to send query to.
  * Sorting and removing unsuitable targets is combined.
+ * Adds records to the infra cache if not already there.
  *
  * @param iter_env: iterator module global state, with ip6 enabled and 
  *	do-not-query-addresses.
@@ -130,7 +143,9 @@ struct dns_msg* dns_copy_msg(struct dns_msg* from, struct regional* regional);
  * 	can be prefetch-updates.
  * @param region: to copy modified (cache is better) rrs back to.
  * @param flags: with BIT_CD for dns64 AAAA translated queries.
- * @return void, because we are not interested in alloc errors,
+ * @param qstarttime: time of query start.
+ * @param is_valrec: if the query is validation recursion and does not get
+ * return void, because we are not interested in alloc errors,
  * 	the iterator and validator can operate on the results in their
  * 	scratch space (the qstate.region) and are not dependent on the cache.
  * 	It is useful to log the alloc failure (for the server operator),
@@ -138,7 +153,8 @@ struct dns_msg* dns_copy_msg(struct dns_msg* from, struct regional* regional);
  */
 void iter_dns_store(struct module_env* env, struct query_info* qinf,
 	struct reply_info* rep, int is_referral, time_t leeway, int pside,
-	struct regional* region, uint16_t flags);
+	struct regional* region, uint16_t flags, time_t qstarttime,
+	int is_valrec);
 
 /**
  * Select randomly with n/m probability.
@@ -173,10 +189,17 @@ void iter_mark_pside_cycle_targets(struct module_qstate* qstate,
  * @param qinfo: query name and type
  * @param qflags: query flags with RD flag
  * @param dp: delegpt to check.
+ * @param supports_ipv4: if we support ipv4 for lookups to the target.
+ * 	if not, then the IPv4 addresses are useless.
+ * @param supports_ipv6: if we support ipv6 for lookups to the target.
+ * 	if not, then the IPv6 addresses are useless.
+ * @param use_nat64: if we support NAT64 for lookups to the target.
+ *	if yes, IPv4 addresses are useful even if we don't support IPv4.
  * @return true if dp is useless.
  */
-int iter_dp_is_useless(struct query_info* qinfo, uint16_t qflags, 
-	struct delegpt* dp);
+int iter_dp_is_useless(struct query_info* qinfo, uint16_t qflags,
+	struct delegpt* dp, int supports_ipv4, int supports_ipv6,
+	int use_nat64);
 
 /**
  * See if qname has DNSSEC needs.  This is true if there is a trust anchor above
@@ -335,19 +358,29 @@ void iter_scrub_ds(struct dns_msg* msg, struct ub_packed_rrset_key* ns,
 	uint8_t* z);
 
 /**
+ * Prepare an NXDOMAIN message to be used for a subdomain answer by removing all
+ * RRs from the ANSWER section.
+ * @param msg: the response to scrub.
+ */
+void iter_scrub_nxdomain(struct dns_msg* msg);
+
+/**
  * Remove query attempts from all available ips. For 0x20.
  * @param dp: delegpt.
  * @param d: decrease.
+ * @param outbound_msg_retry: number of retries of outgoing queries
  */
-void iter_dec_attempts(struct delegpt* dp, int d);
+void iter_dec_attempts(struct delegpt* dp, int d, int outbound_msg_retry);
 
 /**
  * Add retry counts from older delegpt to newer delegpt.
  * Does not waste time on timeout'd (or other failing) addresses.
  * @param dp: new delegationpoint.
  * @param old: old delegationpoint.
+ * @param outbound_msg_retry: number of retries of outgoing queries
  */
-void iter_merge_retry_counts(struct delegpt* dp, struct delegpt* old);
+void iter_merge_retry_counts(struct delegpt* dp, struct delegpt* old,
+	int outbound_msg_retry);
 
 /**
  * See if a DS response (type ANSWER) is too low: a nodata answer with 
@@ -373,9 +406,87 @@ int iter_dp_cangodown(struct query_info* qinfo, struct delegpt* dp);
  * Lookup if no_cache is set in stub or fwd.
  * @param qstate: query state with env with hints and fwds.
  * @param qinf: query name to lookup for.
+ * @param retdpname: returns NULL or the deepest enclosing name of fwd or stub.
+ * 	This is the name under which the closest lookup is going to happen.
+ * 	Used for NXDOMAIN checks, above that it is an nxdomain from a
+ * 	different server and zone. You can pass NULL to not get it.
+ * @param retdpnamelen: returns the length of the dpname.
+ * @param dpname_storage: this is where the dpname buf is stored, if any.
+ * 	So that caller can manage the buffer.
+ * @param dpname_storage_len: size of dpname_storage buffer.
  * @return true if no_cache is set in stub or fwd.
  */
 int iter_stub_fwd_no_cache(struct module_qstate *qstate,
-	struct query_info *qinf);
+	struct query_info *qinf, uint8_t** retdpname, size_t* retdpnamelen,
+	uint8_t* dpname_storage, size_t dpname_storage_len);
+
+/**
+ * Set support for IP4 and IP6 depending on outgoing interfaces
+ * in the outside network.  If none, no support, so no use to lookup
+ * the AAAA and then attempt to use it if there is no outgoing-interface
+ * for it.
+ * @param mods: modstack to find iterator module in.
+ * @param env: module env, find iterator module (if one) in there.
+ * @param outnet: outside network structure.
+ */
+void iterator_set_ip46_support(struct module_stack* mods,
+	struct module_env* env, struct outside_network* outnet);
+
+/**
+ * Read config string that represents the target fetch policy.
+ * @param target_fetch_policy: alloced on return.
+ * @param max_dependency_depth: set on return.
+ * @param str: the config string
+ * @return false on failure.
+ */
+int read_fetch_policy(int** target_fetch_policy, int* max_dependency_depth,
+	const char* str);
+
+/**
+ * Create caps exempt data structure.
+ * @return NULL on failure.
+ */
+struct rbtree_type* caps_white_create(void);
+
+/**
+ * Delete caps exempt data structure.
+ * @param caps_white: caps exempt tree.
+ */
+void caps_white_delete(struct rbtree_type* caps_white);
+
+/**
+ * Apply config caps whitelist items to name tree
+ * @param ntree: caps exempt tree.
+ * @param cfg: config with options.
+ */
+int caps_white_apply_cfg(struct rbtree_type* ntree, struct config_file* cfg);
+
+/**
+ * Apply config for nat64
+ * @param nat64: the nat64 state.
+ * @param cfg: config with options.
+ * @return false on failure.
+ */
+int nat64_apply_cfg(struct iter_nat64* nat64, struct config_file* cfg);
+
+/**
+ * Limit NSEC and NSEC3 TTL in response, RFC9077
+ * @param msg: dns message, the SOA record ttl is used to restrict ttls
+ *	of NSEC and NSEC3 RRsets. If no SOA record, nothing happens.
+ */
+void limit_nsec_ttl(struct dns_msg* msg);
+
+/**
+ * Make the response minimal. Removed authority and additional section,
+ * that works when there is an answer in the answer section.
+ * @param rep: reply to modify.
+ */
+void iter_make_minimal(struct reply_info* rep);
+
+/** See if we need a different port number */
+int deleg_port_number(struct module_env* env);
+
+/** Shorten reply CNAME chain to cutoff, cutoff is excluded. */
+void shorten_answer_cname(struct reply_info* rep, uint8_t* cutoff);
 
 #endif /* ITERATOR_ITER_UTILS_H */

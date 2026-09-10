@@ -78,16 +78,40 @@
  */
 #define MAX_VALUE 0x7fffffff
 
-#if defined(HAVE_SSL)
-void
-ub_systemseed(unsigned int ATTR_UNUSED(seed))
+/* If the build mode is for fuzzing this removes randomness from the output.
+ * This helps fuzz engines from having state increase due to the randomness. */
+#ifdef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
+struct ub_randstate {
+       unsigned int dummy;
+};
+
+struct ub_randstate* ub_initstate(struct ub_randstate* ATTR_UNUSED(from))
 {
-	/* arc4random_uniform does not need seeds, it gets kernel entropy */
+       struct ub_randstate* s = (struct ub_randstate*)calloc(1, sizeof(*s));
+       if(!s) {
+               log_err("malloc failure in random init");
+               return NULL;
+       }
+       return s;
 }
 
+long int ub_random(struct ub_randstate* state)
+{
+       state->dummy++;
+       return (long int)(state->dummy & MAX_VALUE);
+}
+
+long int
+ub_random_max(struct ub_randstate* state, long int x)
+{
+       state->dummy++;
+       return ((long int)state->dummy % x);
+}
+#else /* !FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION */
+
+#if defined(HAVE_SSL) || defined(HAVE_LIBBSD)
 struct ub_randstate* 
-ub_initstate(unsigned int ATTR_UNUSED(seed),
-	struct ub_randstate* ATTR_UNUSED(from))
+ub_initstate(struct ub_randstate* ATTR_UNUSED(from))
 {
 	struct ub_randstate* s = (struct ub_randstate*)malloc(1);
 	if(!s) {
@@ -119,12 +143,7 @@ struct ub_randstate {
 	int ready;
 };
 
-void ub_systemseed(unsigned int ATTR_UNUSED(seed))
-{
-}
-
-struct ub_randstate* ub_initstate(unsigned int ATTR_UNUSED(seed), 
-	struct ub_randstate* ATTR_UNUSED(from))
+struct ub_randstate* ub_initstate(struct ub_randstate* ATTR_UNUSED(from))
 {
 	struct ub_randstate* s = (struct ub_randstate*)calloc(1, sizeof(*s));
 	if(!s) {
@@ -140,7 +159,9 @@ long int ub_random(struct ub_randstate* ATTR_UNUSED(state))
 	/* random 31 bit value. */
 	SECStatus s = PK11_GenerateRandom((unsigned char*)&x, (int)sizeof(x));
 	if(s != SECSuccess) {
-		log_err("PK11_GenerateRandom error: %s",
+		/* unbound needs secure randomness for randomized
+		 * ID bits and port numbers in packets to upstream servers */
+		fatal_exit("PK11_GenerateRandom error: %s",
 			PORT_ErrorToString(PORT_GetError()));
 	}
 	return x & MAX_VALUE;
@@ -157,17 +178,7 @@ struct ub_randstate {
 	int seeded;
 };
 
-void ub_systemseed(unsigned int ATTR_UNUSED(seed))
-{
-/**
- * We seed on init and not here, as we need the ctx to re-seed.
- * This also means that re-seeding is not supported.
- */
-	log_err("Re-seeding not supported, generator untouched");
-}
-
-struct ub_randstate* ub_initstate(unsigned int seed,
-	struct ub_randstate* ATTR_UNUSED(from))
+struct ub_randstate* ub_initstate(struct ub_randstate* ATTR_UNUSED(from))
 {
 	struct ub_randstate* s = (struct ub_randstate*)calloc(1, sizeof(*s));
 	uint8_t buf[YARROW256_SEED_FILE_SIZE];
@@ -183,15 +194,10 @@ struct ub_randstate* ub_initstate(unsigned int seed,
 		yarrow256_seed(&s->ctx, YARROW256_SEED_FILE_SIZE, buf);
 		s->seeded = yarrow256_is_seeded(&s->ctx);
 	} else {
-		/* Stretch the uint32 input seed and feed it to Yarrow */
-		uint32_t v = seed;
-		size_t i;
-		for(i=0; i < (YARROW256_SEED_FILE_SIZE/sizeof(seed)); i++) {
-			memmove(buf+i*sizeof(seed), &v, sizeof(seed));
-			v = v*seed + (uint32_t)i;
-		}
-		yarrow256_seed(&s->ctx, YARROW256_SEED_FILE_SIZE, buf);
-		s->seeded = yarrow256_is_seeded(&s->ctx);
+		log_err("nettle random(yarrow) cannot initialize, "
+			"getentropy failed: %s", strerror(errno));
+		free(s);
+		return NULL;
 	}
 
 	return s;
@@ -208,10 +214,10 @@ long int ub_random(struct ub_randstate* s)
 	}
 	return x & MAX_VALUE;
 }
-#endif /* HAVE_SSL or HAVE_NSS or HAVE_NETTLE */
+#endif /* HAVE_SSL or HAVE_LIBBSD or HAVE_NSS or HAVE_NETTLE */
 
 
-#if defined(HAVE_NSS) || defined(HAVE_NETTLE)
+#if defined(HAVE_NSS) || defined(HAVE_NETTLE) && !defined(HAVE_LIBBSD)
 long int
 ub_random_max(struct ub_randstate* state, long int x)
 {
@@ -223,7 +229,9 @@ ub_random_max(struct ub_randstate* state, long int x)
 		v = ub_random(state);
 	return (v % x);
 }
-#endif /* HAVE_NSS or HAVE_NETTLE */
+#endif /* HAVE_NSS or HAVE_NETTLE and !HAVE_LIBBSD */
+
+#endif /* FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION */
 
 void 
 ub_randfree(struct ub_randstate* s)

@@ -36,6 +36,8 @@ extern struct sldns_struct_lookup_table* sldns_opcodes;
 extern struct sldns_struct_lookup_table* sldns_edns_flags;
 /** EDNS option codes */
 extern struct sldns_struct_lookup_table* sldns_edns_options;
+/** EDNS EDE codes */
+extern struct sldns_struct_lookup_table* sldns_edns_ede_codes;
 /** error string from wireparse */
 extern struct sldns_struct_lookup_table* sldns_wireparse_errors;
 /** tsig errors are the rcodes with extra (higher) values */
@@ -59,7 +61,7 @@ char* sldns_wire2str_pkt(uint8_t* data, size_t len);
 char* sldns_wire2str_rr(uint8_t* rr, size_t len);
 
 /**
- * Conver wire dname to a string.
+ * Convert wire dname to a string.
  * @param dname: the dname in uncompressed wireformat.
  * @param dname_len: length of the dname.
  * @return string or NULL on failure.
@@ -156,10 +158,11 @@ int sldns_wire2str_pkt_scan(uint8_t** data, size_t* data_len, char** str,
  * @param str_len: length of string buffer.
  * @param pkt: packet for decompression, if NULL no decompression.
  * @param pktlen: length of packet buffer.
+ * @param comprloop: if pkt, bool detects compression loops.
  * @return number of characters (except null) needed to print.
  */
 int sldns_wire2str_rr_scan(uint8_t** data, size_t* data_len, char** str,
-	size_t* str_len, uint8_t* pkt, size_t pktlen);
+	size_t* str_len, uint8_t* pkt, size_t pktlen, int* comprloop);
 
 /**
  * Scan wireformat question rr to string, with user buffers.
@@ -170,10 +173,11 @@ int sldns_wire2str_rr_scan(uint8_t** data, size_t* data_len, char** str,
  * @param str_len: length of string buffer.
  * @param pkt: packet for decompression, if NULL no decompression.
  * @param pktlen: length of packet buffer.
+ * @param comprloop: if pkt, bool detects compression loops.
  * @return number of characters (except null) needed to print.
  */
 int sldns_wire2str_rrquestion_scan(uint8_t** data, size_t* data_len, char** str,
-	size_t* str_len, uint8_t* pkt, size_t pktlen);
+	size_t* str_len, uint8_t* pkt, size_t pktlen, int* comprloop);
 
 /**
  * Scan wireformat RR to string in unknown RR format, with user buffers.
@@ -184,10 +188,11 @@ int sldns_wire2str_rrquestion_scan(uint8_t** data, size_t* data_len, char** str,
  * @param str_len: length of string buffer.
  * @param pkt: packet for decompression, if NULL no decompression.
  * @param pktlen: length of packet buffer.
+ * @param comprloop: if pkt, bool detects compression loops.
  * @return number of characters (except null) needed to print.
  */
 int sldns_wire2str_rr_unknown_scan(uint8_t** data, size_t* data_len, char** str,
-	size_t* str_len, uint8_t* pkt, size_t pktlen);
+	size_t* str_len, uint8_t* pkt, size_t pktlen, int* comprloop);
 
 /**
  * Print to string the RR-information comment in default format,
@@ -228,10 +233,12 @@ int sldns_wire2str_header_scan(uint8_t** data, size_t* data_len, char** str,
  * @param rrtype: RR type of Rdata, host format.
  * @param pkt: packet for decompression, if NULL no decompression.
  * @param pktlen: length of packet buffer.
+ * @param comprloop: if pkt, bool detects compression loops.
  * @return number of characters (except null) needed to print.
  */
 int sldns_wire2str_rdata_scan(uint8_t** data, size_t* data_len, char** str,
-	size_t* str_len, uint16_t rrtype, uint8_t* pkt, size_t pktlen);
+	size_t* str_len, uint16_t rrtype, uint8_t* pkt, size_t pktlen,
+	int* comprloop);
 
 /**
  * Scan wireformat rdata to string in unknown format, with user buffers.
@@ -254,10 +261,17 @@ int sldns_wire2str_rdata_unknown_scan(uint8_t** data, size_t* data_len,
  * @param str_len: length of string buffer.
  * @param pkt: packet for decompression, if NULL no decompression.
  * @param pktlen: length of packet buffer.
+ * @param comprloop: inout bool, that is set true if compression loop failure
+ * 	happens.  Pass in 0, if passed in as true, a lower bound is set
+ * 	on compression loops to stop arbitrary long packet parse times.
+ * 	This is meant so you can set it to 0 at the start of a list of dnames,
+ * 	and then scan all of them in sequence, if a loop happens, it becomes
+ * 	true and then it becomes more strict for the next dnames in the list.
+ * 	You can leave it at NULL if there is no pkt (pkt is NULL too).
  * @return number of characters (except null) needed to print.
  */
 int sldns_wire2str_dname_scan(uint8_t** data, size_t* data_len, char** str,
-	size_t* str_len, uint8_t* pkt, size_t pktlen);
+	size_t* str_len, uint8_t* pkt, size_t pktlen, int* comprloop);
 
 /**
  * Scan wireformat rr type to string, with user buffers.
@@ -483,6 +497,18 @@ int sldns_wire2str_dname_buf(uint8_t* dname, size_t dname_len, char* str,
 	size_t len);
 
 /**
+ * Convert wire SVCB to a string with user buffer.
+ * @param d: the SVCB data in uncompressed wireformat.
+ * @param dlen: length of the SVCB data.
+ * @param s: the string to write to.
+ * @param slen: length of string.
+ * @return the number of characters for this element, excluding zerobyte.
+ * 	Is larger or equal than str_len if output was truncated.
+ */
+int sldns_wire2str_svcparam_scan(uint8_t** d, size_t* dlen, char** s,
+	size_t* slen);
+
+/**
  * Scan wireformat rdf field to string, with user buffers.
  * It shifts the arguments to move along (see sldns_wire2str_pkt_scan).
  * @param data: wireformat data.
@@ -492,11 +518,13 @@ int sldns_wire2str_dname_buf(uint8_t* dname, size_t dname_len, char* str,
  * @param rdftype: the type of the rdata field, enum sldns_rdf_type.
  * @param pkt: packet for decompression, if NULL no decompression.
  * @param pktlen: length of packet buffer.
+ * @param comprloop: if pkt, bool detects compression loops.
  * @return number of characters (except null) needed to print.
  * 	Can return -1 on failure.
  */
 int sldns_wire2str_rdf_scan(uint8_t** data, size_t* data_len, char** str,
-	size_t* str_len, int rdftype, uint8_t* pkt, size_t pktlen);
+	size_t* str_len, int rdftype, uint8_t* pkt, size_t pktlen,
+	int* comprloop);
 
 /**
  * Scan wireformat int8 field to string, with user buffers.
@@ -793,11 +821,12 @@ int sldns_wire2str_atma_scan(uint8_t** data, size_t* data_len, char** str,
  * @param str_len: length of string buffer.
  * @param pkt: packet for decompression, if NULL no decompression.
  * @param pktlen: length of packet buffer.
+ * @param comprloop: if pkt, bool detects compression loops.
  * @return number of characters (except null) needed to print.
  * 	Can return -1 on failure.
  */
 int sldns_wire2str_ipseckey_scan(uint8_t** data, size_t* data_len, char** str,
-	size_t* str_len, uint8_t* pkt, size_t pktlen);
+	size_t* str_len, uint8_t* pkt, size_t pktlen, int* comprloop);
 
 /**
  * Scan wireformat HIP (algo, HIT, pubkey) field to string, with user buffers.
@@ -888,6 +917,19 @@ int sldns_wire2str_eui48_scan(uint8_t** data, size_t* data_len, char** str,
  * 	Can return -1 on failure.
  */
 int sldns_wire2str_eui64_scan(uint8_t** data, size_t* data_len, char** str,
+	size_t* str_len);
+
+/**
+ * Scan wireformat UNQUOTED field to string, with user buffers.
+ * It shifts the arguments to move along (see sldns_wire2str_pkt_scan).
+ * @param data: wireformat data.
+ * @param data_len: length of data buffer.
+ * @param str: string buffer.
+ * @param str_len: length of string buffer.
+ * @return number of characters (except null) needed to print.
+ * 	Can return -1 on failure.
+ */
+int sldns_wire2str_unquoted_scan(uint8_t** data, size_t* data_len, char** str,
 	size_t* str_len);
 
 /**
@@ -991,6 +1033,17 @@ int sldns_wire2str_edns_n3u_print(char** str, size_t* str_len,
  * @return number of characters (except null) needed to print.
  */
 int sldns_wire2str_edns_subnet_print(char** str, size_t* str_len,
+	uint8_t* option_data, size_t option_len);
+
+/**
+ * Print EDNS EDE option data to string. User buffers, moves string pointers.
+ * @param str: string buffer.
+ * @param str_len: length of string buffer.
+ * @param option_data: buffer with EDNS option code data.
+ * @param option_len: length of the data for this option.
+ * @return number of characters (except null) needed to print.
+ */
+int sldns_wire2str_edns_ede_print(char** str, size_t* str_len,
 	uint8_t* option_data, size_t option_len);
 
 /**

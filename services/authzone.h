@@ -46,6 +46,7 @@
 #include "util/rbtree.h"
 #include "util/locks.h"
 #include "services/mesh.h"
+#include "services/rpz.h"
 struct ub_packed_rrset_key;
 struct regional;
 struct config_file;
@@ -69,7 +70,8 @@ struct auth_chunk;
  * Authoritative zones, shared.
  */
 struct auth_zones {
-	/** lock on the authzone trees */
+	/** lock on the authzone trees. It is locked after views, respip,
+	 * local_zones and before fwds and stubs. */
 	lock_rw_type lock;
 	/** rbtree of struct auth_zone */
 	rbtree_type ztree;
@@ -77,10 +79,11 @@ struct auth_zones {
 	rbtree_type xtree;
 	/** do we have downstream enabled */
 	int have_downstream;
-	/** number of queries upstream */
-	size_t num_query_up;
-	/** number of queries downstream */
-	size_t num_query_down;
+	/** first auth zone containing rpz item in linked list */
+	struct auth_zone* rpz_first;
+	/** rw lock for rpz linked list, needed when iterating or editing linked
+	 * list. */
+	lock_rw_type rpz_lock;
 };
 
 /**
@@ -115,6 +118,8 @@ struct auth_zone {
 	char* zonefile;
 	/** fallback to the internet on failure or ttl-expiry of auth zone */
 	int fallback_enabled;
+	/** the time when zone was transferred from upstream */
+	time_t soa_zone_acquired;
 	/** the zone has expired (enabled by the xfer worker), fallback
 	 * happens if that option is enabled. */
 	int zone_expired;
@@ -126,10 +131,34 @@ struct auth_zone {
 	/** for upstream: this zone answers queries that unbound intends to
 	 * send upstream. */
 	int for_upstream;
+	/** check ZONEMD records */
+	int zonemd_check;
+	/** reject absence of ZONEMD records */
+	int zonemd_reject_absence;
+	/** RPZ zones */
+	struct rpz* rpz;
+	/** store the env (worker thread specific) for the zonemd callbacks
+	 * from the mesh with the results of the lookup, if nonNULL, some
+	 * worker has already picked up the zonemd verification task and
+	 * this worker does not have to do it as well. */
+	struct module_env* zonemd_callback_env;
+	/** for the zonemd callback, the type of data looked up */
+	uint16_t zonemd_callback_qtype;
+	/** for the zonemd callback, the unique info */
+	void* zonemd_callback_unique_info;
 	/** zone has been deleted */
 	int zone_deleted;
 	/** deletelist pointer, unused normally except during delete */
 	struct auth_zone* delete_next;
+	/* not protected by auth_zone lock, must be last items in struct */
+	/** next auth zone containing RPZ data, or NULL */
+	struct auth_zone* rpz_az_next;
+	/** previous auth zone containing RPZ data, or NULL */
+	struct auth_zone* rpz_az_prev;
+	/** The maximum auth zone transfer size, in bytes. */
+	size_t max_transfer_size;
+	/** The maximum auth zone transfer time taken, in msec. */
+	int max_transfer_time;
 };
 
 /**
@@ -187,7 +216,9 @@ struct auth_xfer {
 	 * one of the tasks. 
 	 * Once it has the task assigned to it, the worker can access the
 	 * other elements of the task structure without a lock, because that
-	 * is necessary for the eventloop and callbacks from that. */
+	 * is necessary for the eventloop and callbacks from that.
+	 * The auth_zone->lock is locked before this lock.
+	 */
 	lock_basic_type lock;
 
 	/** zone name, in uncompressed wireformat */
@@ -238,6 +269,8 @@ struct auth_xfer {
 	int zone_expired;
 	/** do we have a zone (if 0, no zone data at all) */
 	int have_zone;
+	/** the time when zone was transferred from upstream */
+	time_t soa_zone_acquired;
 
 	/** current serial (from SOA), if we have no zone, 0 */
 	uint32_t serial;
@@ -256,6 +289,15 @@ struct auth_xfer {
 	 * this is renewed every SOA probe and transfer.  On zone load
 	 * from zonefile it is also set (with probe set soon to check) */
 	time_t lease_time;
+
+	/** The maximum auth zone transfer size, in bytes. */
+	size_t max_transfer_size;
+	/** The maximum auth zone transfer time taken, in msec. */
+	int max_transfer_time;
+	/** the zone is an rpz zone */
+	int is_rpz;
+	/** the number of IXFRs since the last full transfer. */
+	int num_ixfrs;
 };
 
 /**
@@ -304,6 +346,8 @@ struct auth_probe {
 
 	/** for the hostname lookups, which master is current */
 	struct auth_master* lookup_target;
+	/** for the lookup, the callback unique info */
+	void* lookup_unique_info;
 	/** are we looking up A or AAAA, first A, then AAAA (if ip6 enabled) */
 	int lookup_aaaa;
 	/** we only want to do lookups for making config work (for notify),
@@ -327,6 +371,8 @@ struct auth_probe {
 	/** the SOA probe udp event.
 	 * on the workers event base. */
 	struct comm_point* cp;
+	/** is the cp for ip6 or ip4 */
+	int cp_is_ip6;
 	/** timeout for packets.
 	 * on the workers event base. */
 	struct comm_timer* timer;
@@ -350,12 +396,18 @@ struct auth_transfer {
 	struct auth_chunk* chunks_first;
 	/** last element in chunks list (to append new data at the end) */
 	struct auth_chunk* chunks_last;
+	/** running total of bytes held in chunks_first..chunks_last */
+	size_t chunks_total;
+	/** start time of the transfer */
+	struct timeval start_time;
 
 	/** list of upstream masters for this zone, from config */
 	struct auth_master* masters;
 
 	/** for the hostname lookups, which master is current */
 	struct auth_master* lookup_target;
+	/** for the lookup, the callback unique info */
+	void* lookup_unique_info;
 	/** are we looking up A or AAAA, first A, then AAAA (if ip6 enabled) */
 	int lookup_aaaa;
 
@@ -398,6 +450,9 @@ struct auth_transfer {
 	/** the transfer (TCP) to the master.
 	 * on the workers event base. */
 	struct comm_point* cp;
+	/** timeout for the transfer.
+	 * on the workers event base. */
+	struct comm_timer* timer;
 };
 
 /** list of addresses */
@@ -455,10 +510,14 @@ struct auth_zones* auth_zones_create(void);
  * @param az: auth zones structure
  * @param cfg: config to apply.
  * @param setup: if true, also sets up values in the auth zones structure
+ * @param is_rpz: set to 1 if at least one RPZ zone is configured.
+ * @param env: environment for offline verification.
+ * @param mods: modules in environment.
  * @return false on failure.
  */
 int auth_zones_apply_cfg(struct auth_zones* az, struct config_file* cfg,
-	int setup);
+	int setup, int* is_rpz, struct module_env* env,
+	struct module_stack* mods);
 
 /** initial pick up of worker timeouts, ties events to worker event loop
  * @param az: auth zones structure
@@ -518,9 +577,10 @@ int auth_zones_lookup(struct auth_zones* az, struct query_info* qinfo,
  * @param temp: temporary storage region.
  * @return false if not answered
  */
-int auth_zones_answer(struct auth_zones* az, struct module_env* env,
+int auth_zones_downstream_answer(struct auth_zones* az, struct module_env* env,
 	struct query_info* qinfo, struct edns_data* edns,
-	struct comm_reply* repinfo, struct sldns_buffer* buf, struct regional* temp);
+	struct comm_reply* repinfo, struct sldns_buffer* buf,
+	struct regional* temp);
 
 /** 
  * Find the auth zone that is above the given qname.
@@ -603,8 +663,14 @@ int auth_zones_startprobesequence(struct auth_zones* az,
 /** read auth zone from zonefile. caller must lock zone. false on failure */
 int auth_zone_read_zonefile(struct auth_zone* z, struct config_file* cfg);
 
+/** find the apex SOA RRset, if it exists. NULL if no SOA RRset. */
+struct auth_rrset* auth_zone_get_soa_rrset(struct auth_zone* z);
+
 /** find serial number of zone or false if none (no SOA record) */
 int auth_zone_get_serial(struct auth_zone* z, uint32_t* serial);
+
+/** Find auth_zone SOA and populate the values in xfr(soa values). */
+int xfr_find_soa(struct auth_zone* z, struct auth_xfer* xfr);
 
 /** compare auth_zones for sorted rbtree */
 int auth_zone_cmp(const void* z1, const void* z2);
@@ -647,6 +713,8 @@ int auth_xfer_transfer_http_callback(struct comm_point* c, void* arg, int err,
         struct comm_reply* repinfo);
 /** xfer probe timeout callback, part of task_probe */
 void auth_xfer_probe_timer_callback(void* arg);
+/** xfer transfer timeout callback, part of task_transfer */
+void auth_xfer_transfer_timer_callback(void* arg);
 /** mesh callback for task_probe on lookup of host names */
 void auth_xfer_probe_lookup_callback(void* arg, int rcode,
 	struct sldns_buffer* buf, enum sec_status sec, char* why_bogus,
@@ -663,5 +731,130 @@ void auth_xfer_transfer_lookup_callback(void* arg, int rcode,
  * 3.2.).
  */
 int compare_serial(uint32_t a, uint32_t b);
+
+/**
+ * Generate ZONEMD digest for the auth zone.
+ * @param z: the auth zone to digest.
+ * 	omits zonemd at apex and its RRSIG from the digest.
+ * @param scheme: the collation scheme to use.  Numbers as defined for ZONEMD.
+ * @param hashalgo: the hash algo, from the registry defined for ZONEMD type.
+ * @param hash: the result buffer.
+ * @param buflen: size of the result buffer, must be large enough. or the
+ * 	routine fails.
+ * @param resultlen: size of the hash in the result buffer of the result.
+ * @param region: temp region for allocs during canonicalisation.
+ * @param buf: temp buffer during canonicalisation.
+ * @param reason: failure reason, returns a string, NULL on success.
+ * @return false on failure.
+ */
+int auth_zone_generate_zonemd_hash(struct auth_zone* z, int scheme,
+	int hashalgo, uint8_t* hash, size_t buflen, size_t* resultlen,
+	struct regional* region, struct sldns_buffer* buf, char** reason);
+
+/** ZONEMD scheme definitions */
+#define ZONEMD_SCHEME_SIMPLE 1
+
+/** ZONEMD hash algorithm definition for SHA384 */
+#define ZONEMD_ALGO_SHA384 1
+/** ZONEMD hash algorithm definition for SHA512 */
+#define ZONEMD_ALGO_SHA512 2
+
+/** returns true if a zonemd hash algo is supported */
+int zonemd_hashalgo_supported(int hashalgo);
+/** returns true if a zonemd scheme is supported */
+int zonemd_scheme_supported(int scheme);
+
+/**
+ * Check ZONEMD digest for the auth zone.
+ * @param z: auth zone to digest.
+ * @param scheme: zonemd scheme.
+ * @param hashalgo: zonemd hash algorithm.
+ * @param hash: the hash to check.
+ * @param hashlen: length of hash buffer.
+ * @param region: temp region for allocs during canonicalisation.
+ * @param buf: temp buffer during canonicalisation.
+ * @param reason: string returned with failure reason.
+ * 	If the hash cannot be checked, but it is allowed, for unknown
+ * 	algorithms, the routine returns success, and the reason is nonNULL,
+ * 	with the allowance reason.
+ * @return false on failure.
+ */
+int auth_zone_generate_zonemd_check(struct auth_zone* z, int scheme,
+	int hashalgo, uint8_t* hash, size_t hashlen, struct regional* region,
+	struct sldns_buffer* buf, char** reason);
+
+/**
+ * Perform ZONEMD checks and verification for the auth zone.
+ * This includes DNSSEC verification if applicable.
+ * @param z: auth zone to check.  Caller holds lock. wrlock.
+ * @param env: with temp region, buffer and config.
+ * @param mods: module stack for validator env.
+ * @param result: if not NULL, result string strdupped in here.
+ * @param offline: if true, there is no spawned lookup when online is needed.
+ * 	Those zones are skipped for ZONEMD checking.
+ * @param only_online: if true, only for ZONEMD that need online lookup
+ * 	of DNSKEY chain of trust are processed.
+ */
+void auth_zone_verify_zonemd(struct auth_zone* z, struct module_env* env,
+	struct module_stack* mods, char** result, int offline,
+	int only_online);
+
+/** mesh callback for zonemd on lookup of dnskey */
+void auth_zonemd_dnskey_lookup_callback(void* arg, int rcode,
+	struct sldns_buffer* buf, enum sec_status sec, char* why_bogus,
+	int was_ratelimited);
+
+/**
+ * Check the ZONEMD records that need online DNSSEC chain lookups,
+ * for them spawn the lookup process to get it checked out.
+ * Attaches the lookup process to the worker event base and mesh state.
+ * @param az: auth zones, every zones is checked.
+ * @param env: env of the worker where the task is attached.
+ */
+void auth_zones_pickup_zonemd_verify(struct auth_zones* az,
+	struct module_env* env);
+
+/** Get memory usage for auth zones. The routine locks and unlocks
+ * for reading. */
+size_t auth_zones_get_mem(struct auth_zones* zones);
+
+/**
+ * Initial pick up of the auth zone nextprobe timeout and that turns
+ * into further zone transfer work, if any. Also sets the lease time.
+ * @param x: xfer structure, locked by caller.
+ * @param env: environment of the worker that picks up the task.
+ */
+void auth_xfer_pickup_initial_zone(struct auth_xfer* x,
+	struct module_env* env);
+
+/**
+ * Initial pick up of the auth zone, it sets the acquired time.
+ * @param z: the zone, write locked by caller.
+ * @param env: environment of the worker, with current time.
+ */
+void auth_zone_pickup_initial_zone(struct auth_zone* z,
+	struct module_env* env);
+
+/**
+ * Delete auth xfer structure
+ * @param xfr: delete this xfer and its tasks.
+ */
+void auth_xfer_delete(struct auth_xfer* xfr);
+
+/**
+ * Disown tasks from the xfr that belong to this worker.
+ * Only tasks for the worker in question, the comm point and timer
+ * delete functions need to run in the thread of that worker to be
+ * able to delete the callback from the event base.
+ * @param xfr: xfr structure
+ * @param worker: the worker for which to stop tasks.
+ */
+void xfr_disown_tasks(struct auth_xfer* xfr, struct worker* worker);
+
+/** count number of open and closed parenthesis in a chunkline */
+int chunkline_count_parens(struct sldns_buffer* buf, size_t start);
+
+/** Clear data in auth zone */
+void auth_zone_clear_data(struct auth_zone* z);
 
 #endif /* SERVICES_AUTHZONE_H */

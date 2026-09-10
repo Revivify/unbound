@@ -45,6 +45,7 @@
 #ifdef HAVE_TIME_H
 #include <time.h>
 #endif
+#include <sys/time.h>
 #ifdef HAVE_SYSLOG_H
 #  include <syslog.h>
 #else
@@ -61,7 +62,7 @@
 #endif
 
 /* default verbosity */
-enum verbosity_value verbosity = 0;
+enum verbosity_value verbosity = NO_VERBOSE;
 /** the file logged to. */
 static FILE* logfile = 0;
 /** if key has been created */
@@ -70,36 +71,60 @@ static int key_created = 0;
 static ub_thread_key_type logkey;
 #ifndef THREADS_DISABLED
 /** pthread mutex to protect FILE* */
-static lock_quick_type log_lock;
+static lock_basic_type log_lock;
+#ifdef HAVE_PTHREAD
+/* Guards the one-time initialization below. Without this, two threads
+ * calling log_init() for the first time concurrently (e.g. via
+ * ub_ctx_create() from a multi-threaded application) can both observe
+ * key_created==0 and both call lock_basic_init(&log_lock), a data race
+ * that reinitializes/corrupts an in-use mutex. */
+static pthread_once_t log_lock_once = PTHREAD_ONCE_INIT;
+#endif
 #endif
 /** the identity of this executable/process */
 static const char* ident="unbound";
+static const char* default_ident="unbound";
 #if defined(HAVE_SYSLOG_H) || defined(UB_ON_WINDOWS)
 /** are we using syslog(3) to log to */
 static int logging_to_syslog = 0;
 #endif /* HAVE_SYSLOG_H */
 /** print time in UTC or in secondsfrom1970 */
 static int log_time_asc = 0;
+/** print time in iso format */
+static int log_time_iso = 0;
+
+#if !defined(THREADS_DISABLED) && defined(HAVE_PTHREAD)
+static void log_lock_init_once(void)
+{
+	ub_thread_key_create(&logkey, NULL);
+	lock_basic_init(&log_lock);
+	key_created = 1;
+}
+#endif
 
 void
 log_init(const char* filename, int use_syslog, const char* chrootdir)
 {
 	FILE *f;
+#if !defined(THREADS_DISABLED) && defined(HAVE_PTHREAD)
+	(void)pthread_once(&log_lock_once, log_lock_init_once);
+#else
 	if(!key_created) {
 		key_created = 1;
 		ub_thread_key_create(&logkey, NULL);
-		lock_quick_init(&log_lock);
+		lock_basic_init(&log_lock);
 	}
-	lock_quick_lock(&log_lock);
+#endif
+	lock_basic_lock(&log_lock);
 	if(logfile 
 #if defined(HAVE_SYSLOG_H) || defined(UB_ON_WINDOWS)
 	|| logging_to_syslog
 #endif
 	) {
-		lock_quick_unlock(&log_lock); /* verbose() needs the lock */
+		lock_basic_unlock(&log_lock); /* verbose() needs the lock */
 		verbose(VERB_QUERY, "switching log to %s", 
 			use_syslog?"syslog":(filename&&filename[0]?filename:"stderr"));
-		lock_quick_lock(&log_lock);
+		lock_basic_lock(&log_lock);
 	}
 	if(logfile && logfile != stderr) {
 		FILE* cl = logfile;
@@ -115,9 +140,11 @@ log_init(const char* filename, int use_syslog, const char* chrootdir)
 	if(use_syslog) {
 		/* do not delay opening until first write, because we may
 		 * chroot and no longer be able to access dev/log and so on */
-		openlog(ident, LOG_NDELAY, LOG_DAEMON);
+		/* the facility is LOG_DAEMON by default, but
+		 * --with-syslog-facility=LOCAL[0-7] can override it */
+		openlog(ident, LOG_NDELAY, UB_SYSLOG_FACILITY);
 		logging_to_syslog = 1;
-		lock_quick_unlock(&log_lock);
+		lock_basic_unlock(&log_lock);
 		return;
 	}
 #elif defined(UB_ON_WINDOWS)
@@ -126,13 +153,13 @@ log_init(const char* filename, int use_syslog, const char* chrootdir)
 	}
 	if(use_syslog) {
 		logging_to_syslog = 1;
-		lock_quick_unlock(&log_lock);
+		lock_basic_unlock(&log_lock);
 		return;
 	}
 #endif /* HAVE_SYSLOG_H */
 	if(!filename || !filename[0]) {
 		logfile = stderr;
-		lock_quick_unlock(&log_lock);
+		lock_basic_unlock(&log_lock);
 		return;
 	}
 	/* open the file for logging */
@@ -141,7 +168,7 @@ log_init(const char* filename, int use_syslog, const char* chrootdir)
 		filename += strlen(chrootdir);
 	f = fopen(filename, "a");
 	if(!f) {
-		lock_quick_unlock(&log_lock);
+		lock_basic_unlock(&log_lock);
 		log_err("Could not open logfile %s: %s", filename, 
 			strerror(errno));
 		return;
@@ -151,14 +178,14 @@ log_init(const char* filename, int use_syslog, const char* chrootdir)
 	setvbuf(f, NULL, (int)_IOLBF, 0);
 #endif
 	logfile = f;
-	lock_quick_unlock(&log_lock);
+	lock_basic_unlock(&log_lock);
 }
 
 void log_file(FILE *f)
 {
-	lock_quick_lock(&log_lock);
+	lock_basic_lock(&log_lock);
 	logfile = f;
-	lock_quick_unlock(&log_lock);
+	lock_basic_unlock(&log_lock);
 }
 
 void log_thread_set(int* num)
@@ -168,10 +195,10 @@ void log_thread_set(int* num)
 
 int log_thread_get(void)
 {
-	unsigned int* tid;
+	int* tid;
 	if(!key_created) return 0;
-	tid = (unsigned int*)ub_thread_key_get(logkey);
-	return (int)(tid?*tid:0);
+	tid = ub_thread_key_get(logkey);
+	return (tid?*tid:0);
 }
 
 void log_ident_set(const char* id)
@@ -179,9 +206,32 @@ void log_ident_set(const char* id)
 	ident = id;
 }
 
+void log_ident_set_default(const char* id)
+{
+	default_ident = id;
+}
+
+void log_ident_revert_to_default(void)
+{
+	ident = default_ident;
+}
+
+void log_ident_set_or_default(const char* identity)
+{
+	if(identity == NULL || identity[0] == 0)
+		log_ident_set(default_ident);
+	else
+		log_ident_set(identity);
+}
+
 void log_set_time_asc(int use_asc)
 {
 	log_time_asc = use_asc;
+}
+
+void log_set_time_iso(int use_iso)
+{
+	log_time_iso = use_iso;
 }
 
 void* log_get_lock(void)
@@ -200,7 +250,7 @@ log_vmsg(int pri, const char* type,
 	const char *format, va_list args)
 {
 	char message[MAXSYSLOGMSGLEN];
-	unsigned int* tid = (unsigned int*)ub_thread_key_get(logkey);
+	int tid = log_thread_get();
 	time_t now;
 #if defined(HAVE_STRFTIME) && defined(HAVE_LOCALTIME_R) 
 	char tmbuf[32];
@@ -212,8 +262,8 @@ log_vmsg(int pri, const char* type,
 	vsnprintf(message, sizeof(message), format, args);
 #ifdef HAVE_SYSLOG_H
 	if(logging_to_syslog) {
-		syslog(pri, "[%d:%x] %s: %s", 
-			(int)getpid(), tid?*tid:0, type, message);
+		syslog(pri, "[%d:%d] %s: %s",
+			(int)getpid(), tid, type, message);
 		return;
 	}
 #elif defined(UB_ON_WINDOWS)
@@ -234,8 +284,8 @@ log_vmsg(int pri, const char* type,
 			tp=MSG_GENERIC_SUCCESS;
 			wt=EVENTLOG_SUCCESS;
 		}
-		snprintf(m, sizeof(m), "[%s:%x] %s: %s", 
-			ident, tid?*tid:0, type, message);
+		snprintf(m, sizeof(m), "[%s:%d] %s: %s",
+			ident, tid, type, message);
 		s = RegisterEventSource(NULL, SERVICE_NAME);
 		if(!s) return;
 		ReportEvent(s, wt, 0, tp, NULL, 1, 0, &str, NULL);
@@ -243,34 +293,62 @@ log_vmsg(int pri, const char* type,
 		return;
 	}
 #endif /* HAVE_SYSLOG_H */
-	lock_quick_lock(&log_lock);
+	lock_basic_lock(&log_lock);
 	if(!logfile) {
-		lock_quick_unlock(&log_lock);
+		lock_basic_unlock(&log_lock);
 		return;
 	}
+#if defined(HAVE_STRFTIME) && defined(HAVE_LOCALTIME_R)
+	if(log_time_iso && log_time_asc) {
+		char tzbuf[16];
+		struct timeval tv;
+		struct tm *tm_p;
+		if(gettimeofday(&tv, NULL) < 0)
+			memset(&tv, 0, sizeof(tv));
+		now = (time_t)tv.tv_sec;
+		tm_p = localtime_r(&now, &tm);
+		strftime(tmbuf, sizeof(tmbuf), "%Y-%m-%dT%H:%M:%S", tm_p);
+		if(strftime(tzbuf, sizeof(tzbuf), "%z", tm_p) == 5) {
+			/* put ':' in "+hh:mm" */
+			tzbuf[5] = tzbuf[4];
+			tzbuf[4] = tzbuf[3];
+			tzbuf[3] = ':';
+			tzbuf[6] = 0;
+		}
+		fprintf(logfile, "%s.%3.3d%s %s[%d:%d] %s: %s\n",
+			tmbuf, (int)tv.tv_usec/1000, tzbuf,
+			ident, (int)getpid(), tid, type, message);
+#ifdef UB_ON_WINDOWS
+		/* line buffering does not work on windows */
+		fflush(logfile);
+#endif
+		lock_basic_unlock(&log_lock);
+		return;
+	}
+#endif /* HAVE_STRFTIME && HAVE_LOCALTIME_R */
 	now = (time_t)time(NULL);
 #if defined(HAVE_STRFTIME) && defined(HAVE_LOCALTIME_R) 
 	if(log_time_asc && strftime(tmbuf, sizeof(tmbuf), "%b %d %H:%M:%S",
 		localtime_r(&now, &tm))%(sizeof(tmbuf)) != 0) {
 		/* %sizeof buf!=0 because old strftime returned max on error */
-		fprintf(logfile, "%s %s[%d:%x] %s: %s\n", tmbuf, 
-			ident, (int)getpid(), tid?*tid:0, type, message);
+		fprintf(logfile, "%s %s[%d:%d] %s: %s\n", tmbuf,
+			ident, (int)getpid(), tid, type, message);
 	} else
 #elif defined(UB_ON_WINDOWS)
 	if(log_time_asc && GetTimeFormat(LOCALE_USER_DEFAULT, 0, NULL, NULL,
 		tmbuf, sizeof(tmbuf)) && GetDateFormat(LOCALE_USER_DEFAULT, 0,
 		NULL, NULL, dtbuf, sizeof(dtbuf))) {
-		fprintf(logfile, "%s %s %s[%d:%x] %s: %s\n", dtbuf, tmbuf, 
-			ident, (int)getpid(), tid?*tid:0, type, message);
+		fprintf(logfile, "%s %s %s[%d:%d] %s: %s\n", dtbuf, tmbuf,
+			ident, (int)getpid(), tid, type, message);
 	} else
 #endif
-	fprintf(logfile, "[" ARG_LL "d] %s[%d:%x] %s: %s\n", (long long)now, 
-		ident, (int)getpid(), tid?*tid:0, type, message);
+	fprintf(logfile, "[" ARG_LL "d] %s[%d:%d] %s: %s\n", (long long)now,
+		ident, (int)getpid(), tid, type, message);
 #ifdef UB_ON_WINDOWS
 	/* line buffering does not work on windows */
 	fflush(logfile);
 #endif
-	lock_quick_unlock(&log_lock);
+	lock_basic_unlock(&log_lock);
 }
 
 /**

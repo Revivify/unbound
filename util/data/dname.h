@@ -197,6 +197,15 @@ int dname_lab_cmp(uint8_t* d1, int labs1, uint8_t* d2, int labs2, int* mlabs);
 int dname_lab_startswith(uint8_t* label, char* prefix, char** endptr);
 
 /**
+ * Check if dname contains label
+ * @param dname: dname
+ * @param dnamelen: length of dname
+ * @param label: label to be checked for presence in dname
+ * @return: 1 if dname has this label, 0 otherwise
+ */
+int dname_has_label(uint8_t* dname, size_t dnamelen, uint8_t* label);
+
+/**
  * See if domain name d1 is a strict subdomain of d2.
  * That is a subdomain, but not equal. 
  * @param d1: domain name, uncompressed wireformat
@@ -216,7 +225,7 @@ int dname_strict_subdomain(uint8_t* d1, int labs1, uint8_t* d2, int labs2);
 int dname_strict_subdomain_c(uint8_t* d1, uint8_t* d2);
 
 /**
- * Counts labels. Tests is d1 is a subdomain of d2.
+ * Counts labels. Tests if d1 is a subdomain of d2.
  * @param d1: domain name, uncompressed wireformat
  * @param d2: domain name, uncompressed wireformat
  * @return true if d1 is a subdomain of d2.
@@ -233,11 +242,12 @@ void dname_print(FILE* out, struct sldns_buffer* pkt, uint8_t* dname);
 
 /** 
  * Debug helper. Print dname to given string buffer (string buffer must
- * be at least 255 chars + 1 for the 0, in printable form.
+ * be at least 255 chars, in printable form.
  * This may lose information (? for nonprintable characters, or & if
  * the name is too long, # for a bad label length).
+ * Upon return, the buffer will always have a terminating \0 value.
  * @param dname: uncompressed wireformat.
- * @param str: buffer of 255+1 length.
+ * @param str: buffer of at least 255 length.
  */
 void dname_str(uint8_t* dname, char* str);
 
@@ -252,9 +262,22 @@ int dname_is_root(uint8_t* dname);
  * Snip off first label from a dname, returning the parent zone.
  * @param dname: from what to strip off. uncompressed wireformat.
  * @param len: length, adjusted to become less.
- * @return stripped off, or "." if input was ".".
+ * return dname stripped off, or "." if input was ".".
  */
 void dname_remove_label(uint8_t** dname, size_t* len);
+
+/**
+ * Same as dname_remove_label but fails if removal would surpass lenlimit.
+ * If no failure,
+ * snip off first label from a dname, returning the parent zone.
+ * @param dname: from what to strip off. uncompressed wireformat.
+ * @param len: length, adjusted to become less.
+ * @param lenlimit: length limit that we can't surpass (usually the zone apex).
+ * @return
+ *	o 1,  and dname stripped off, or "." if input was ".", else
+ *	o 0, if going up would surpass lenlimit.
+ */
+int dname_remove_label_limit_len(uint8_t** dname, size_t* len, size_t lenlimit);
 
 /**
  * Snip off first N labels from a dname, returning the parent zone.
@@ -262,7 +285,7 @@ void dname_remove_label(uint8_t** dname, size_t* len);
  * @param len: length, adjusted to become less.
  * @param n: number of labels to strip off (from the left).
  * 	if 0, nothing happens.
- * @return stripped off, or "." if input was ".".
+ * return stripped off, or "." if input was ".".
  */
 void dname_remove_labels(uint8_t** dname, size_t* len, int n);
 

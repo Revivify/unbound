@@ -42,6 +42,7 @@
 #ifndef NET_HELP_H
 #define NET_HELP_H
 #include "util/log.h"
+#include "util/random.h"
 struct sock_list;
 struct regional;
 struct config_strlist;
@@ -76,8 +77,6 @@ struct config_strlist;
 
 /** timeout in milliseconds for UDP queries to auth servers. */
 #define UDP_AUTH_QUERY_TIMEOUT 3000
-/** timeout in milliseconds for TCP queries to auth servers. */
-#define TCP_AUTH_QUERY_TIMEOUT 3000
 /** Advertised version of EDNS capabilities */
 #define EDNS_ADVERTISED_VERSION         0
 /** Advertised size of EDNS capabilities */
@@ -93,6 +92,14 @@ extern uint16_t EDNS_ADVERTISED_SIZE;
 #define DNSKEY_BIT_ZSK 0x0100
 /** DNSKEY secure entry point, KSK flag */
 #define DNSKEY_BIT_SEP 0x0001
+
+/** return a random 16-bit number given a random source */
+#define GET_RANDOM_ID(rnd) (((unsigned)ub_random(rnd)>>8) & 0xffff)
+
+/** define MSG_DONTWAIT for unsupported platforms */
+#ifndef MSG_DONTWAIT
+#define MSG_DONTWAIT 0
+#endif
 
 /** minimal responses when positive answer */
 extern int MINIMAL_RESPONSES;
@@ -176,10 +183,11 @@ void log_err_addr(const char* str, const char* err,
  * @param str: the string
  * @param addr: where to store sockaddr.
  * @param addrlen: length of stored sockaddr is returned.
+ * @param port: default port.
  * @return 0 on error.
  */
 int extstrtoaddr(const char* str, struct sockaddr_storage* addr, 
-	socklen_t* addrlen);
+	socklen_t* addrlen, int port);
 
 /**
  * Convert ip address string and port to sockaddr.
@@ -208,16 +216,29 @@ int netblockstrtoaddr(const char* ip, int port, struct sockaddr_storage* addr,
 /**
  * Convert address string, with "@port" appendix, to sockaddr.
  * It can also have an "#tls-auth-name" appendix (after the port).
- * The returned tls-auth-name string is a pointer into the input string.
- * Uses DNS port by default.
+ * The returned auth_name string is a pointer into the input string.
+ * Uses DNS port by default; TLS port when a "#tls-auth-name" is configured.
  * @param str: the string
  * @param addr: where to store sockaddr.
  * @param addrlen: length of stored sockaddr is returned.
  * @param auth_name: returned pointer to tls_auth_name, or NULL if none.
  * @return 0 on error.
  */
-int authextstrtoaddr(char* str, struct sockaddr_storage* addr, 
+int authextstrtoaddr(char* str, struct sockaddr_storage* addr,
 	socklen_t* addrlen, char** auth_name);
+
+/**
+ * Convert domain string, with "@port" appendix, to dname.
+ * It can also have an "#tls-auth-name" appendix (after the port).
+ * The return port is the parsed port.
+ * Uses DNS port by default; TLS port when a "#tls-auth-name" is configured.
+ * The returned auth_name string is a pointer into the input string.
+ * @param str: the string
+ * @param port: pointer to be assigned the parsed port value.
+ * @param auth_name: returned pointer to tls_auth_name, or NULL if none.
+ * @return pointer to the dname.
+ */
+uint8_t* authextstrtodname(char* str, int* port, char** auth_name);
 
 /**
  * Store port number into sockaddr structure
@@ -269,12 +290,24 @@ int sockaddr_cmp_addr(struct sockaddr_storage* addr1, socklen_t len1,
 	struct sockaddr_storage* addr2, socklen_t len2);
 
 /**
+ * Compare two sockaddrs. Imposes an ordering on the addresses.
+ * Compares address and port. It also compares scope_id for ip6.
+ * @param addr1: address 1.
+ * @param len1: lengths of addr1.
+ * @param addr2: address 2.
+ * @param len2: lengths of addr2.
+ * @return: 0 if addr1 == addr2. -1 if addr1 is smaller, +1 if larger.
+ */
+int sockaddr_cmp_scopeid(struct sockaddr_storage* addr1, socklen_t len1,
+	struct sockaddr_storage* addr2, socklen_t len2);
+
+/**
  * Checkout address family.
  * @param addr: the sockaddr to examine.
  * @param len: the length of addr.
  * @return: true if sockaddr is ip6.
  */
-int addr_is_ip6(struct sockaddr_storage* addr, socklen_t len);
+int addr_is_ip6(const struct sockaddr_storage* addr, socklen_t len);
 
 /**
  * Make sure the sockaddr ends in zeroes. For tree insertion and subsequent
@@ -311,12 +344,43 @@ void addr_to_str(struct sockaddr_storage* addr, socklen_t addrlen,
 	char* buf, size_t len);
 
 /**
+ * Check if the prefix network length is one of the allowed 32, 40, 48, 56, 64,
+ * or 96.
+ * @param prefixnet: prefix network length to check.
+ * @return 1 on success, 0 on failure.
+ */
+int prefixnet_is_nat64(int prefixnet);
+
+/**
+ * Create a NAT64 address from a given address (needs to be IPv4) and a given
+ * NAT64 prefix. The NAT64 prefix net needs to be one of 32, 40, 48, 56, 64, 96.
+ * @param addr: IPv4 address.
+ * @param nat64_prefix: NAT64 prefix.
+ * @param nat64_prefixlen: NAT64 prefix len.
+ * @param nat64_prefixnet: NAT64 prefix mask.
+ * @param nat64_addr: the resulting NAT64 address.
+ * @param nat64_addrlen: the resulting NAT64 address length.
+ */
+void addr_to_nat64(const struct sockaddr_storage* addr,
+	const struct sockaddr_storage* nat64_prefix,
+	socklen_t nat64_prefixlen, int nat64_prefixnet,
+	struct sockaddr_storage* nat64_addr, socklen_t* nat64_addrlen);
+
+/**
  * See if sockaddr is an ipv6 mapped ipv4 address, "::ffff:0.0.0.0"
  * @param addr: address
  * @param addrlen: length of address
  * @return true if so
  */
 int addr_is_ip4mapped(struct sockaddr_storage* addr, socklen_t addrlen);
+
+/**
+ * See if sockaddr is an ipv6 fe80::/10 link local address.
+ * @param addr: address
+ * @param addrlen: length of address
+ * @return true if so
+ */
+int addr_is_ip6linklocal(struct sockaddr_storage* addr, socklen_t addrlen);
 
 /**
  * See if sockaddr is 255.255.255.255.
@@ -379,11 +443,45 @@ void sock_list_merge(struct sock_list** list, struct regional* region,
 void log_crypto_err(const char* str);
 
 /**
+ * Log libcrypto error from errcode with descriptive string, calls log_err.
+ * @param str: what failed.
+ * @param err: error code from ERR_get_error.
+ */
+void log_crypto_err_code(const char* str, unsigned long err);
+
+/**
+ * Log an error from libcrypto that came from SSL_write and so on, with
+ * a value from SSL_get_error, calls log_err. If that fails it logs with
+ * log_crypto_err.
+ * @param str: what failed
+ * @param r: output of SSL_get_error on the I/O operation result.
+ */
+void log_crypto_err_io(const char* str, int r);
+
+/**
+ * Log an error from libcrypt that came from an I/O routine with the
+ * errcode from ERR_get_error. Calls log_err() and log_crypto_err_code.
+ * @param str: what failed
+ * @param r: output of SSL_get_error on the I/O operation result.
+ * @param err: error code from ERR_get_error
+ */
+void log_crypto_err_io_code(const char* str, int r, unsigned long err);
+
+/**
+ * Log certificate details verbosity, string, of X509 cert
+ * @param level: verbosity level
+ * @param str: string to prefix on output
+ * @param cert: X509* structure.
+ */
+void log_cert(unsigned level, const char* str, void* cert);
+
+/**
  * Set SSL_OP_NOxxx options on SSL context to disable bad crypto
  * @param ctxt: SSL_CTX*
+ * @param tls_protocols: configure string with allowed TLS protocols to use.
  * @return false on failure.
  */
-int listen_sslctx_setup(void* ctxt);
+int listen_sslctx_setup(void* ctxt, const char* tls_protocols);
 
 /**
  * Further setup of listening SSL context, after keys loaded.
@@ -391,14 +489,24 @@ int listen_sslctx_setup(void* ctxt);
  */
 void listen_sslctx_setup_2(void* ctxt);
 
-/** 
+/**
  * create SSL listen context
  * @param key: private key file.
  * @param pem: public key cert.
  * @param verifypem: if nonNULL, verifylocation file.
+ * @param tls_ciphers: if non empty string, tls ciphers to use.
+ * @param tls_ciphersuites: if non empty string, tls ciphersuites to use.
+ * @param set_ticket_keys_cb: if the callback for configured ticket keys needs
+ *	to be set.
+ * @param is_dot: if the TLS connection is for DoT to set the appropriate ALPN.
+ * @param is_doh: if the TLS connection is for DoH to set the appropriate ALPN.
+ * @param tls_protocols: configure string with allowed TLS protocols to use.
  * return SSL_CTX* or NULL on failure (logged).
  */
-void* listen_sslctx_create(char* key, char* pem, char* verifypem);
+void* listen_sslctx_create(const char* key, const char* pem,
+	const char* verifypem, const char* tls_ciphers,
+	const char* tls_ciphersuites, int set_ticket_keys_cb,
+	int is_dot, int is_doh, const char* tls_protocols);
 
 /**
  * create SSL connect context
@@ -428,6 +536,22 @@ void* incoming_ssl_fd(void* sslctx, int fd);
 void* outgoing_ssl_fd(void* sslctx, int fd);
 
 /**
+ * check if authname SSL functionality is available, false if not
+ * @param auth_name: the name for the remote server, used for error print.
+ * @return false if SSL functionality to check the SSL name is not available.
+ */
+int check_auth_name_for_ssl(char* auth_name);
+
+/**
+ * set auth name on SSL for verification
+ * @param ssl: SSL* to set
+ * @param auth_name: if NULL nothing happens, otherwise the name to check.
+ * @param use_sni: if SNI will be used.
+ * @return 1 on success or NULL auth_name, 0 on failure.
+ */
+int set_auth_name_on_ssl(void* ssl, char* auth_name, int use_sni);
+
+/**
  * Initialize openssl locking for thread safety
  * @return false on failure (alloc failure).
  */
@@ -440,28 +564,44 @@ void ub_openssl_lock_delete(void);
 
 /**
  * setup TLS session ticket
- * @param sslctx: the SSL_CTX to use (from connect_sslctx_create())
  * @param tls_session_ticket_keys: TLS ticket secret filenames
+ * @param chroot: if not NULL, the chroot that is in use.
  * @return false on failure (alloc failure).
  */
-int listen_sslctx_setup_ticket_keys(void* sslctx,
-	struct config_strlist* tls_session_ticket_keys);
-
-/**
- * callback TLS session ticket encrypt and decrypt
- * For use with SSL_CTX_set_tlsext_ticket_key_cb
- * @param s: the SSL_CTX to use (from connect_sslctx_create())
- * @param key_name: secret name, 16 bytes
- * @param iv: up to EVP_MAX_IV_LENGTH.
- * @param evp_ctx: the evp cipher context, function sets this.
- * @param hmac_ctx: the hmax context, function sets this.
- * @param enc: 1 is encrypt, 0 is decrypt
- * @return 0 on no ticket, 1 for okay, and 2 for okay but renew the ticket
- * 	(the ticket is decrypt only). and <0 for failures.
- */
-int tls_session_ticket_key_cb(void *s, unsigned char* key_name,unsigned char* iv, void *evp_ctx, void *hmac_ctx, int enc);
+int listen_sslctx_setup_ticket_keys(
+	struct config_strlist* tls_session_ticket_keys, char* chroot);
 
 /** Free memory used for TLS session ticket keys */
 void listen_sslctx_delete_ticket_keys(void);
+
+/**
+ * RPZ format netblock to network byte order address and netblock
+ * example RPZ netblock format dnames:
+ *  - 24.10.100.51.198.rpz-ip -> 198.51.100.10/24
+ *  - 32.10.zz.db8.2001.rpz-ip -> 2001:db8:0:0:0:0:0:10/32
+ * @param dname: the dname containing RPZ format netblock
+ * @param dnamelen: length of dname
+ * @param addr: where to store sockaddr.
+ * @param addrlen: length of stored sockaddr is returned.
+ * @param net: where to store netmask
+ * @param af: where to store address family.
+ * @return 0 on error.
+ */
+int netblockdnametoaddr(uint8_t* dname, size_t dnamelen,
+	struct sockaddr_storage* addr, socklen_t* addrlen, int* net, int* af);
+
+/** Return strerror or wsastrerror for socket error printout */
+char* sock_strerror(int errn);
+/** close the socket with close, or wsa closesocket */
+void sock_close(int socket);
+
+/**
+ * Convert binary data to a string of hexadecimal characters.
+ */
+ssize_t hex_ntop(uint8_t const *src, size_t srclength, char *target,
+		 size_t targsize);
+
+/** Convert hexadecimal data to binary. */
+ssize_t hex_pton(const char* src, uint8_t* target, size_t targsize);
 
 #endif /* NET_HELP_H */

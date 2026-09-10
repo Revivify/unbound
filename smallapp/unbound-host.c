@@ -1,5 +1,5 @@
 /*
- * checkconf/unbound-host.c - replacement for host that supports validation.
+ * smallapp/unbound-host.c - replacement for host that supports validation.
  *
  * Copyright (c) 2007, NLnet Labs. All rights reserved.
  *
@@ -50,6 +50,8 @@
 #undef calloc
 #undef free
 #undef realloc
+#undef reallocarray
+#undef strdup
 #endif
 #ifdef UNBOUND_ALLOC_LITE
 #undef malloc
@@ -426,6 +428,7 @@ int main(int argc, char* argv[])
 	int c;
 	char* qclass = NULL;
 	char* qtype = NULL;
+	char* use_syslog = NULL;
 	struct ub_ctx* ctx = NULL;
 	int debuglevel = 0;
 	
@@ -481,21 +484,28 @@ int main(int argc, char* argv[])
 		case '?':
 		case 'h':
 		default:
+			ub_ctx_delete(ctx);
 			usage();
 		}
 	}
 	if(debuglevel != 0) /* set after possible -C options */
 		check_ub_res(ub_ctx_debuglevel(ctx, debuglevel));
-	if(ub_ctx_get_option(ctx, "use-syslog", &optarg) == 0) {
-		if(strcmp(optarg, "yes") == 0) /* disable use-syslog */
+	if(ub_ctx_get_option(ctx, "use-syslog", &use_syslog) == 0) {
+		if(strcmp(use_syslog, "yes") == 0) /* disable use-syslog */
 			check_ub_res(ub_ctx_set_option(ctx, 
 				"use-syslog:", "no"));
-		free(optarg);
+#ifdef UNBOUND_ALLOC_STATS
+		unbound_stat_free_log(use_syslog, __FILE__, __LINE__, __func__);
+#else
+		free(use_syslog);
+#endif
 	}
 	argc -= optind;
 	argv += optind;
-	if(argc != 1)
+	if(argc != 1) {
+		ub_ctx_delete(ctx);
 		usage();
+	}
 
 #ifdef HAVE_SSL
 #ifdef HAVE_ERR_LOAD_CRYPTO_STRINGS
@@ -505,16 +515,26 @@ int main(int argc, char* argv[])
 	ERR_load_SSL_strings();
 #endif
 #if OPENSSL_VERSION_NUMBER < 0x10100000 || !defined(HAVE_OPENSSL_INIT_CRYPTO)
+#  ifndef S_SPLINT_S
 	OpenSSL_add_all_algorithms();
+#  endif
 #else
 	OPENSSL_init_crypto(OPENSSL_INIT_ADD_ALL_CIPHERS
 		| OPENSSL_INIT_ADD_ALL_DIGESTS
-		| OPENSSL_INIT_LOAD_CRYPTO_STRINGS, NULL);
+		| OPENSSL_INIT_LOAD_CRYPTO_STRINGS
+#  if defined(OPENSSL_INIT_NO_LOAD_CONFIG) && defined(UB_ON_WINDOWS)
+		| OPENSSL_INIT_NO_LOAD_CONFIG
+#  endif
+		, NULL);
 #endif
 #if OPENSSL_VERSION_NUMBER < 0x10100000 || !defined(HAVE_OPENSSL_INIT_SSL)
 	(void)SSL_library_init();
 #else
-	(void)OPENSSL_init_ssl(OPENSSL_INIT_LOAD_SSL_STRINGS, NULL);
+	(void)OPENSSL_init_ssl(OPENSSL_INIT_LOAD_SSL_STRINGS
+#  if defined(OPENSSL_INIT_NO_LOAD_CONFIG) && defined(UB_ON_WINDOWS)
+		| OPENSSL_INIT_NO_LOAD_CONFIG
+#  endif
+		, NULL);
 #endif
 #endif /* HAVE_SSL */
 #ifdef HAVE_NSS

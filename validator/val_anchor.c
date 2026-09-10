@@ -483,11 +483,10 @@ anchor_read_file(struct val_anchors* anchors, sldns_buffer* buffer,
 
 /** skip file to end of line */
 static void
-skip_to_eol(FILE* in)
+skip_to_eol(FILE* in, int *c)
 {
-	int c;
-	while((c = getc(in)) != EOF ) {
-		if(c == '\n')
+	while((*c = getc(in)) != EOF ) {
+		if(*c == '\n')
 			return;
 	}
 }
@@ -534,7 +533,11 @@ readkeyword_bindfile(FILE* in, sldns_buffer* buf, int* line, int comments)
 	int numdone = 0;
 	while((c = getc(in)) != EOF ) {
 		if(comments && c == '#') {	/*   # blabla   */
-			skip_to_eol(in);
+			skip_to_eol(in, &c);
+			if(c == EOF) {
+				log_err("trusted-keys, %d, got EOF", *line);
+				return 0;
+			}
 			(*line)++;
 			continue;
 		} else if(comments && c=='/' && numdone>0 && /* /_/ bla*/
@@ -542,7 +545,11 @@ readkeyword_bindfile(FILE* in, sldns_buffer* buf, int* line, int comments)
 			sldns_buffer_position(buf)-1) == '/') {
 			sldns_buffer_skip(buf, -1);
 			numdone--;
-			skip_to_eol(in);
+			skip_to_eol(in, &c);
+			if(c == EOF) {
+				log_err("trusted-keys, %d, got EOF", *line);
+				return 0;
+			}
 			(*line)++;
 			continue;
 		} else if(comments && c=='*' && numdone>0 && /* /_* bla *_/ */
@@ -558,6 +565,10 @@ readkeyword_bindfile(FILE* in, sldns_buffer* buf, int* line, int comments)
 				}
 				if(c == '\n')
 					(*line)++;
+			}
+			if(c == EOF) {
+				log_err("trusted-keys, %d, got EOF", *line);
+				return 0;
 			}
 			continue;
 		}
@@ -579,7 +590,8 @@ readkeyword_bindfile(FILE* in, sldns_buffer* buf, int* line, int comments)
 		}
 		/* space for 1 char + 0 string terminator */
 		if(sldns_buffer_remaining(buf) < 2) {
-			fatal_exit("trusted-keys, %d, string too long", *line);
+			log_err("trusted-keys, %d, string too long", *line);
+			return 0;
 		}
 		sldns_buffer_write_u8(buf, (uint8_t)c);
 		numdone++;
@@ -592,6 +604,10 @@ readkeyword_bindfile(FILE* in, sldns_buffer* buf, int* line, int comments)
 					ungetc(c, in);
 					break;
 				}
+			}
+			if(c == EOF) {
+				log_err("trusted-keys, %d, got EOF", *line);
+				return 0;
 			}
 			return numdone;
 		}
@@ -620,7 +636,7 @@ skip_to_special(FILE* in, sldns_buffer* buf, int* line, int spec)
 		}
 		return 1;
 	}
-	log_err("trusted-keys, line %d, expected %c got EOF", *line, spec);
+	log_err("trusted-keys, line %d, expected %c, read failed", *line, spec);
 	return 0;
 }
 
@@ -813,8 +829,9 @@ anchor_read_bind_file_wild(struct val_anchors* anchors, sldns_buffer* buffer,
 	if(r) {
 		/* some error */
 		if(r == GLOB_NOMATCH) {
-			verbose(VERB_QUERY, "trusted-keys-file: "
-				"no matches for %s", pat);
+			verbose(VERB_OPS, "trusted-keys-file: "
+				"no matches for %s; "
+				"no trust anchors loaded from it", pat);
 			return 1;
 		} else if(r == GLOB_NOSPACE) {
 			log_err("wildcard trusted-keys-file %s: "
@@ -971,7 +988,8 @@ anchors_dnskey_unsupported(struct trust_anchor* ta)
 {
 	size_t i, num = 0;
 	for(i=0; i<ta->numDNSKEY; i++) {
-		if(!dnskey_algo_is_supported(ta->dnskey_rrset, i))
+		if(!dnskey_algo_is_supported(ta->dnskey_rrset, i) ||
+			!dnskey_size_is_supported(ta->dnskey_rrset, i))
 			num++;
 	}
 	return num;
@@ -1007,17 +1025,17 @@ anchors_assemble_rrsets(struct val_anchors* anchors)
 		nods = anchors_ds_unsupported(ta);
 		nokey = anchors_dnskey_unsupported(ta);
 		if(nods) {
-			log_nametypeclass(0, "warning: unsupported "
+			log_nametypeclass(NO_VERBOSE, "warning: unsupported "
 				"algorithm for trust anchor", 
 				ta->name, LDNS_RR_TYPE_DS, ta->dclass);
 		}
 		if(nokey) {
-			log_nametypeclass(0, "warning: unsupported "
+			log_nametypeclass(NO_VERBOSE, "warning: unsupported "
 				"algorithm for trust anchor", 
 				ta->name, LDNS_RR_TYPE_DNSKEY, ta->dclass);
 		}
 		if(nods == ta->numDS && nokey == ta->numDNSKEY) {
-			char b[257];
+			char b[LDNS_MAX_DOMAINLEN];
 			dname_str(ta->name, b);
 			log_warn("trust anchor %s has no supported algorithms,"
 				" the anchor is ignored (check if you need to"
@@ -1030,8 +1048,6 @@ anchors_assemble_rrsets(struct val_anchors* anchors)
 				")", b);
 			(void)rbtree_delete(anchors->tree, &ta->node);
 			lock_basic_unlock(&ta->lock);
-			if(anchors->dlv_anchor == ta)
-				anchors->dlv_anchor = NULL;
 			anchors_delfunc(&ta->node, NULL);
 			ta = next;
 			continue;
@@ -1050,6 +1066,10 @@ anchors_apply_cfg(struct val_anchors* anchors, struct config_file* cfg)
 	const char** zstr;
 	char* nm;
 	sldns_buffer* parsebuf = sldns_buffer_new(65535);
+	if(!parsebuf) {
+		log_err("malloc error in anchors_apply_cfg.");
+		return 0;
+	}
 	if(cfg->insecure_lan_zones) {
 		for(zstr = as112_zones; *zstr; zstr++) {
 			if(!anchor_insert_insecure(anchors, *zstr)) {
@@ -1102,37 +1122,6 @@ anchors_apply_cfg(struct val_anchors* anchors, struct config_file* cfg)
 			sldns_buffer_free(parsebuf);
 			return 0;
 		}
-	}
-	if(cfg->dlv_anchor_file && cfg->dlv_anchor_file[0] != 0) {
-		struct trust_anchor* dlva;
-		nm = cfg->dlv_anchor_file;
-		if(cfg->chrootdir && cfg->chrootdir[0] && strncmp(nm,
-			cfg->chrootdir, strlen(cfg->chrootdir)) == 0)
-			nm += strlen(cfg->chrootdir);
-		if(!(dlva = anchor_read_file(anchors, parsebuf,
-			nm, 1))) {
-			log_err("error reading dlv-anchor-file: %s", 
-				cfg->dlv_anchor_file);
-			sldns_buffer_free(parsebuf);
-			return 0;
-		}
-		lock_basic_lock(&anchors->lock);
-		anchors->dlv_anchor = dlva;
-		lock_basic_unlock(&anchors->lock);
-	}
-	for(f = cfg->dlv_anchor_list; f; f = f->next) {
-		struct trust_anchor* dlva;
-		if(!f->str || f->str[0] == 0) /* empty "" */
-			continue;
-		if(!(dlva = anchor_store_str(
-			anchors, parsebuf, f->str))) {
-			log_err("error in dlv-anchor: \"%s\"", f->str);
-			sldns_buffer_free(parsebuf);
-			return 0;
-		}
-		lock_basic_lock(&anchors->lock);
-		anchors->dlv_anchor = dlva;
-		lock_basic_unlock(&anchors->lock);
 	}
 	/* do autr last, so that it sees what anchors are filled by other
 	 * means can can print errors about double config for the name */
@@ -1198,17 +1187,53 @@ anchors_lookup(struct val_anchors* anchors,
 	return result;
 }
 
+/** Get memory usage of assembled key rrset */
+static size_t
+assembled_rrset_get_mem(struct ub_packed_rrset_key* pkey)
+{
+	size_t s;
+	if(!pkey)
+		return 0;
+	s = sizeof(*pkey) + pkey->rk.dname_len;
+	if(pkey->entry.data) {
+		struct packed_rrset_data* pd = (struct packed_rrset_data*)
+			pkey->entry.data;
+		s += sizeof(*pd) + pd->count * (sizeof(size_t)+sizeof(time_t)+
+			sizeof(uint8_t*));
+	}
+	return s;
+}
+
 size_t 
 anchors_get_mem(struct val_anchors* anchors)
 {
 	struct trust_anchor *ta;
-	size_t s = sizeof(*anchors);
-	if(!anchors)
-		return 0;
+	struct ta_key *k;
+	size_t s;
+	if(!anchors) return 0;
+	s = sizeof(*anchors);
+	lock_basic_lock(&anchors->lock);
 	RBTREE_FOR(ta, struct trust_anchor*, anchors->tree) {
+		lock_basic_lock(&ta->lock);
 		s += sizeof(*ta) + ta->namelen;
 		/* keys and so on */
+		for(k = ta->keylist; k; k = k->next) {
+			s += sizeof(*k) + k->len;
+		}
+		s += assembled_rrset_get_mem(ta->ds_rrset);
+		s += assembled_rrset_get_mem(ta->dnskey_rrset);
+		if(ta->autr) {
+			struct autr_ta* p;
+			s += sizeof(*ta->autr);
+			if(ta->autr->file)
+				s += strlen(ta->autr->file);
+			for(p = ta->autr->keys; p; p=p->next) {
+				s += sizeof(*p) + p->rr_len;
+			}
+		}
+		lock_basic_unlock(&ta->lock);
 	}
+	lock_basic_unlock(&anchors->lock);
 	return s;
 }
 
@@ -1349,4 +1374,44 @@ anchor_has_keytag(struct val_anchors* anchors, uint8_t* name, int namelabs,
 	}
 	free(taglist);
 	return 0;
+}
+
+struct trust_anchor*
+anchors_find_any_noninsecure(struct val_anchors* anchors)
+{
+	struct trust_anchor* ta, *next;
+	lock_basic_lock(&anchors->lock);
+	ta=(struct trust_anchor*)rbtree_first(anchors->tree);
+	while((rbnode_type*)ta != RBTREE_NULL) {
+		next = (struct trust_anchor*)rbtree_next(&ta->node);
+		lock_basic_lock(&ta->lock);
+		if(ta->numDS != 0 || ta->numDNSKEY != 0) {
+			/* not an insecurepoint */
+			lock_basic_unlock(&anchors->lock);
+			return ta;
+		}
+		lock_basic_unlock(&ta->lock);
+		ta = next;
+	}
+	lock_basic_unlock(&anchors->lock);
+	return NULL;
+}
+
+void
+anchors_swap_tree(struct val_anchors* anchors, struct val_anchors* data)
+{
+	rbtree_type* oldtree;
+	rbtree_type oldprobe;
+
+	if(!anchors || !data)
+		return; /* If anchors is NULL, there is no validation. */
+
+	oldtree = anchors->tree;
+	oldprobe = anchors->autr->probe;
+
+	anchors->tree = data->tree;
+	anchors->autr->probe = data->autr->probe;
+
+	data->tree = oldtree;
+	data->autr->probe = oldprobe;
 }

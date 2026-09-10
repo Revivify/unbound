@@ -37,16 +37,23 @@
  * Routines for message parsing a packet buffer to a descriptive structure.
  */
 #include "config.h"
+#include "util/config_file.h"
 #include "util/data/msgparse.h"
 #include "util/data/msgreply.h"
 #include "util/data/dname.h"
 #include "util/data/packed_rrset.h"
+#include "util/netevent.h"
 #include "util/storage/lookup3.h"
 #include "util/regional.h"
+#include "util/rfc_1982.h"
+#include "util/edns.h"
+#include "util/net_help.h"
 #include "sldns/rrdef.h"
 #include "sldns/sbuffer.h"
 #include "sldns/parseutil.h"
 #include "sldns/wire2str.h"
+
+#define MAX_PARSED_EDNS_OPTIONS 100
 
 /** smart comparison of (compressed, valid) dnames from packet */
 static int
@@ -55,7 +62,11 @@ smart_compare(sldns_buffer* pkt, uint8_t* dnow,
 {
 	if(LABEL_IS_PTR(*dnow)) {
 		/* ptr points to a previous dname */
-		uint8_t* p = sldns_buffer_at(pkt, PTR_OFFSET(dnow[0], dnow[1]));
+		uint8_t* p;
+		if((size_t)PTR_OFFSET(dnow[0], dnow[1])
+			>= sldns_buffer_limit(pkt))
+			return -1;
+		p = sldns_buffer_at(pkt, PTR_OFFSET(dnow[0], dnow[1]));
 		if( p == dprfirst || p == dprlast )
 			return 0;
 		/* prev dname is also a ptr, both ptrs are the same. */
@@ -676,6 +687,9 @@ calc_size(sldns_buffer* pkt, uint16_t type, struct rr_parse* rr)
 			}
 			rdf++;
 		}
+		/* rdata ended before all _dname_count names were seen */
+		if(count != 0)
+			return 0; /* the rdata is too short. */
 	}
 	/* remaining rdata */
 	rr->size += pkt_len;
@@ -936,32 +950,226 @@ parse_packet(sldns_buffer* pkt, struct msg_parse* msg, struct regional* region)
 
 /** parse EDNS options from EDNS wireformat rdata */
 static int
-parse_edns_options(uint8_t* rdata_ptr, size_t rdata_len,
-	struct edns_data* edns, struct regional* region)
+parse_edns_options_from_query(uint8_t* rdata_ptr, size_t rdata_len,
+	struct edns_data* edns, struct config_file* cfg, struct comm_point* c,
+	struct comm_reply* repinfo, uint32_t now, struct regional* region,
+	struct cookie_secrets* cookie_secrets)
 {
+	int i = 0, nsid_seen = 0, cookie_seen = 0, padding_seen = 0;
+	/* To respond with a Keepalive option, the client connection must have
+	 * received one message with a TCP Keepalive EDNS option, and that
+	 * option must have 0 length data. Subsequent messages sent on that
+	 * connection will have a TCP Keepalive option.
+	 *
+	 * In the if-statement below, the option is added unsolicited. This
+	 * means that the client has sent an KEEPALIVE option earlier. We know
+	 * here this is true, because c->tcp_keepalive is set.
+	 */
+	if (cfg && cfg->do_tcp_keepalive && c && c->type != comm_udp && c->tcp_keepalive) {
+		if(!edns_opt_list_append_keepalive(&edns->opt_list_out,
+					c->tcp_timeout_msec / 100, region)) {
+			log_err("out of memory");
+			return LDNS_RCODE_SERVFAIL;
+		}
+	}
+
 	/* while still more options, and have code+len to read */
-	/* ignores partial content (i.e. rdata len 3) */
-	while(rdata_len >= 4) {
+	while(rdata_len >= 4 && i < MAX_PARSED_EDNS_OPTIONS) {
 		uint16_t opt_code = sldns_read_uint16(rdata_ptr);
 		uint16_t opt_len = sldns_read_uint16(rdata_ptr+2);
+		uint8_t server_cookie[40];
+		enum edns_cookie_val_status cookie_val_status;
+		int cookie_is_v4 = 1;
+
 		rdata_ptr += 4;
 		rdata_len -= 4;
-		if(opt_len > rdata_len)
-			break; /* option code partial */
-		if(!edns_opt_append(edns, region, opt_code, opt_len,
-			rdata_ptr)) {
+		if(opt_len > rdata_len) {
+			/* option code partial */
+			return LDNS_RCODE_FORMERR;
+		}
+
+		/* handle parse time edns options here */
+		switch(opt_code) {
+		case LDNS_EDNS_NSID:
+			if (!cfg || !cfg->nsid || nsid_seen)
+				break;
+			nsid_seen = 1;
+			if(!edns_opt_list_append(&edns->opt_list_out,
+						LDNS_EDNS_NSID, cfg->nsid_len,
+						cfg->nsid, region)) {
+				log_err("out of memory");
+				return LDNS_RCODE_SERVFAIL;
+			}
+			break;
+
+		case LDNS_EDNS_KEEPALIVE:
+			/* To respond with a Keepalive option, the client
+			 * connection must have received one message with a TCP
+			 * Keepalive EDNS option, and that option must have 0
+			 * length data. Subsequent messages sent on that
+			 * connection will have a TCP Keepalive option.
+			 *
+			 * This should be the first time the client sends this
+			 * option, so c->tcp_keepalive is not set.
+			 * Besides adding the reply KEEPALIVE option, 
+			 * c->tcp_keepalive will be set so that the
+			 * option will be added unsolicited in subsequent
+			 * responses (see the comment above the if-statement
+			 * at the start of this function).
+			 */
+			if (!cfg || !cfg->do_tcp_keepalive || !c ||
+					c->type == comm_udp || c->tcp_keepalive)
+				break;
+			if(opt_len) {
+				verbose(VERB_ALGO, "query with bad edns keepalive.");
+				return LDNS_RCODE_FORMERR;
+			}
+			if(!edns_opt_list_append_keepalive(&edns->opt_list_out,
+						c->tcp_timeout_msec / 100,
+						region)) {
+				log_err("out of memory");
+				return LDNS_RCODE_SERVFAIL;
+			}
+			c->tcp_keepalive = 1;
+			break;
+
+		case LDNS_EDNS_PADDING:
+			if(!cfg || !cfg->pad_responses || !c || padding_seen)
+				break;
+			if(!((c->type == comm_tcp && c->ssl) ||
+				(c->type == comm_http && c->ssl) ||
+				c->type == comm_doq))
+				break;
+			padding_seen = 1;
+			if(!edns_opt_list_append(&edns->opt_list_out,
+						LDNS_EDNS_PADDING,
+						0, NULL, region)) {
+				log_err("out of memory");
+				return LDNS_RCODE_SERVFAIL;
+			}
+			edns->padding_block_size = cfg->pad_responses_block_size;
+			break;
+
+		case LDNS_EDNS_COOKIE:
+			if(!cfg || !cfg->do_answer_cookie || !repinfo || cookie_seen)
+				break;
+			cookie_seen = 1;
+			if(opt_len != 8 && (opt_len < 16 || opt_len > 40)) {
+				verbose(VERB_ALGO, "worker request: "
+					"badly formatted cookie");
+				return LDNS_RCODE_FORMERR;
+			}
+			edns->cookie_present = 1;
+
+			/* Copy client cookie, version and timestamp for
+			 * validation and creation purposes.
+			 */
+			if(opt_len >= 16) {
+				memmove(server_cookie, rdata_ptr, 16);
+			} else {
+				memset(server_cookie, 0, 16);
+				memmove(server_cookie, rdata_ptr, opt_len);
+			}
+
+			/* Copy client ip for validation and creation
+			 * purposes. It will be overwritten if (re)creation
+			 * is needed.
+			 */
+			if(repinfo->client_addr.ss_family == AF_INET) {
+				memcpy(server_cookie + 16,
+					&((struct sockaddr_in*)&repinfo->client_addr)->sin_addr, 4);
+			} else {
+				cookie_is_v4 = 0;
+				memcpy(server_cookie + 16,
+					&((struct sockaddr_in6*)&repinfo->client_addr)->sin6_addr, 16);
+			}
+
+			if(cfg->cookie_secret_file &&
+				cfg->cookie_secret_file[0]) {
+				/* Loop over the active and staging cookies. */
+				cookie_val_status =
+					cookie_secrets_server_validate(
+					rdata_ptr, opt_len, cookie_secrets,
+					cookie_is_v4, server_cookie, now);
+			} else {
+				/* Use the cookie option value to validate. */
+				cookie_val_status = edns_cookie_server_validate(
+					rdata_ptr, opt_len, cfg->cookie_secret,
+					cfg->cookie_secret_len, cookie_is_v4,
+					server_cookie, now);
+			}
+			if(cookie_val_status == COOKIE_STATUS_VALID_RENEW)
+				edns->cookie_valid = 1;
+			switch(cookie_val_status) {
+			case COOKIE_STATUS_VALID:
+				edns->cookie_valid = 1;
+				/* Reuse cookie */
+				if(!edns_opt_list_append(
+					&edns->opt_list_out, LDNS_EDNS_COOKIE,
+					opt_len, rdata_ptr, region)) {
+					log_err("out of memory");
+					return LDNS_RCODE_SERVFAIL;
+				}
+				/* Cookie to be reused added to outgoing
+				 * options. Done!
+				 */
+				break;
+			case COOKIE_STATUS_CLIENT_ONLY:
+				edns->cookie_client = 1;
+				ATTR_FALLTHROUGH
+				/* fallthrough */
+			case COOKIE_STATUS_VALID_RENEW:
+			case COOKIE_STATUS_FUTURE:
+			case COOKIE_STATUS_EXPIRED:
+			case COOKIE_STATUS_INVALID:
+			default:
+				if(cfg->cookie_secret_file &&
+					cfg->cookie_secret_file[0]) {
+					if(!cookie_secrets)
+						break;
+					lock_basic_lock(&cookie_secrets->lock);
+					if(cookie_secrets->cookie_count < 1) {
+						lock_basic_unlock(&cookie_secrets->lock);
+						break;
+					}
+					edns_cookie_server_write(server_cookie,
+						cookie_secrets->cookie_secrets[0].cookie_secret,
+						cookie_is_v4, now);
+					lock_basic_unlock(&cookie_secrets->lock);
+				} else {
+					edns_cookie_server_write(server_cookie,
+						cfg->cookie_secret, cookie_is_v4, now);
+				}
+				if(!edns_opt_list_append(&edns->opt_list_out,
+					LDNS_EDNS_COOKIE, 24, server_cookie,
+					region)) {
+					log_err("out of memory");
+					return LDNS_RCODE_SERVFAIL;
+				}
+				break;
+			}
+			break;
+		default:
+			break;
+		}
+		if(!edns_opt_list_append(&edns->opt_list_in,
+				opt_code, opt_len, rdata_ptr, region)) {
 			log_err("out of memory");
-			return 0;
+			return LDNS_RCODE_SERVFAIL;
 		}
 		rdata_ptr += opt_len;
 		rdata_len -= opt_len;
+		i++;
 	}
-	return 1;
+	/* partial content (i.e. rdata len 3) is FORMERR */
+	if(rdata_len > 0 && rdata_len <= 3)
+		return LDNS_RCODE_FORMERR;
+	return LDNS_RCODE_NOERROR;
 }
 
 int 
-parse_extract_edns(struct msg_parse* msg, struct edns_data* edns,
-	struct regional* region)
+parse_extract_edns_from_response_msg(struct msg_parse* msg,
+	struct edns_data* edns, struct regional* region)
 {
 	struct rrset_parse* rrset = msg->rrset_first;
 	struct rrset_parse* prev = 0;
@@ -969,6 +1177,7 @@ parse_extract_edns(struct msg_parse* msg, struct edns_data* edns,
 	struct rrset_parse* found_prev = 0;
 	size_t rdata_len;
 	uint8_t* rdata_ptr;
+	int i = 0;
 	/* since the class encodes the UDP size, we cannot use hash table to
 	 * find the EDNS OPT record. Scan the packet. */
 	while(rrset) {
@@ -1015,17 +1224,40 @@ parse_extract_edns(struct msg_parse* msg, struct edns_data* edns,
 	edns->edns_version = found->rr_last->ttl_data[1];
 	edns->bits = sldns_read_uint16(&found->rr_last->ttl_data[2]);
 	edns->udp_size = ntohs(found->rrset_class);
-	edns->opt_list = NULL;
+	edns->opt_list_in = NULL;
+	edns->opt_list_out = NULL;
+	edns->opt_list_inplace_cb_out = NULL;
+	edns->padding_block_size = 0;
+	edns->cookie_present = 0;
+	edns->cookie_valid = 0;
 
 	/* take the options */
 	rdata_len = found->rr_first->size-2;
 	rdata_ptr = found->rr_first->ttl_data+6;
-	if(!parse_edns_options(rdata_ptr, rdata_len, edns, region))
-		return 0;
 
+	/* while still more options, and have code+len to read */
+	/* ignores partial content (i.e. rdata len 3) */
+	while(rdata_len >= 4 && i < MAX_PARSED_EDNS_OPTIONS) {
+		uint16_t opt_code = sldns_read_uint16(rdata_ptr);
+		uint16_t opt_len = sldns_read_uint16(rdata_ptr+2);
+		rdata_ptr += 4;
+		rdata_len -= 4;
+		if(opt_len > rdata_len)
+			break; /* option code partial */
+			/* This is lenient for partially broken messages
+			 * from upstream. With a partial EDNS option. */
+
+		if(!edns_opt_list_append(&edns->opt_list_in,
+				opt_code, opt_len, rdata_ptr, region)) {
+			log_err("out of memory");
+			break;
+		}
+		rdata_ptr += opt_len;
+		rdata_len -= opt_len;
+		i++;
+	}
 	/* ignore rrsigs */
-
-	return 0;
+	return LDNS_RCODE_NOERROR;
 }
 
 /** skip RR in packet */
@@ -1043,7 +1275,7 @@ skip_pkt_rr(sldns_buffer* pkt)
 }
 
 /** skip RRs from packet */
-static int
+int
 skip_pkt_rrs(sldns_buffer* pkt, int num)
 {
 	int i;
@@ -1055,24 +1287,26 @@ skip_pkt_rrs(sldns_buffer* pkt, int num)
 }
 
 int 
-parse_edns_from_pkt(sldns_buffer* pkt, struct edns_data* edns,
-	struct regional* region)
+parse_edns_from_query_pkt(sldns_buffer* pkt, struct edns_data* edns,
+	struct config_file* cfg, struct comm_point* c,
+	struct comm_reply* repinfo, time_t now, struct regional* region,
+	struct cookie_secrets* cookie_secrets)
 {
 	size_t rdata_len;
 	uint8_t* rdata_ptr;
 	log_assert(LDNS_QDCOUNT(sldns_buffer_begin(pkt)) == 1);
+	memset(edns, 0, sizeof(*edns));
 	if(LDNS_ANCOUNT(sldns_buffer_begin(pkt)) != 0 ||
 		LDNS_NSCOUNT(sldns_buffer_begin(pkt)) != 0) {
 		if(!skip_pkt_rrs(pkt, ((int)LDNS_ANCOUNT(sldns_buffer_begin(pkt)))+
 			((int)LDNS_NSCOUNT(sldns_buffer_begin(pkt)))))
-			return 0;
+			return LDNS_RCODE_FORMERR;
 	}
 	/* check edns section is present */
 	if(LDNS_ARCOUNT(sldns_buffer_begin(pkt)) > 1) {
 		return LDNS_RCODE_FORMERR;
 	}
 	if(LDNS_ARCOUNT(sldns_buffer_begin(pkt)) == 0) {
-		memset(edns, 0, sizeof(*edns));
 		edns->udp_size = 512;
 		return 0;
 	}
@@ -1088,19 +1322,21 @@ parse_edns_from_pkt(sldns_buffer* pkt, struct edns_data* edns,
 	edns->ext_rcode = sldns_buffer_read_u8(pkt); /* ttl used for bits */
 	edns->edns_version = sldns_buffer_read_u8(pkt);
 	edns->bits = sldns_buffer_read_u16(pkt);
-	edns->opt_list = NULL;
+	edns->opt_list_in = NULL;
+	edns->opt_list_out = NULL;
+	edns->opt_list_inplace_cb_out = NULL;
+	edns->padding_block_size = 0;
+	edns->cookie_present = 0;
+	edns->cookie_valid = 0;
 
 	/* take the options */
 	rdata_len = sldns_buffer_read_u16(pkt);
 	if(sldns_buffer_remaining(pkt) < rdata_len)
 		return LDNS_RCODE_FORMERR;
 	rdata_ptr = sldns_buffer_current(pkt);
-	if(!parse_edns_options(rdata_ptr, rdata_len, edns, region))
-		return LDNS_RCODE_SERVFAIL;
-
 	/* ignore rrsigs */
-
-	return 0;
+	return parse_edns_options_from_query(rdata_ptr, rdata_len, edns, cfg,
+		c, repinfo, now, region, cookie_secrets);
 }
 
 void
@@ -1121,3 +1357,40 @@ log_edns_opt_list(enum verbosity_value level, const char* info_str,
 		}
 	}
 }
+
+/** remove RR from msgparse RRset, return true if rrset is entirely bad */
+int
+msgparse_rrset_remove_rr(const char* str, sldns_buffer* pkt, struct rrset_parse* rrset,
+	struct rr_parse* prev, struct rr_parse* rr, struct sockaddr_storage* addr, socklen_t addrlen)
+{
+	if(verbosity >= VERB_QUERY && rrset->dname_len <= LDNS_MAX_DOMAINLEN && str) {
+		uint8_t buf[LDNS_MAX_DOMAINLEN+1];
+		dname_pkt_copy(pkt, buf, rrset->dname);
+		if(addr)
+			log_name_addr(VERB_QUERY, str, buf, addr, addrlen);
+		else	log_nametypeclass(VERB_QUERY, str, buf,
+				rrset->type, ntohs(rrset->rrset_class));
+	}
+	if(prev)
+		prev->next = rr->next;
+	else	rrset->rr_first = rr->next;
+	if(rrset->rr_last == rr)
+		rrset->rr_last = prev;
+	rrset->rr_count --;
+	rrset->size -= rr->size;
+	/* rr struct still exists, but is unlinked, so that in the for loop
+	 * the rr->next works fine to continue. */
+	return rrset->rr_count == 0;
+}
+
+#ifdef UNBOUND_DEBUG
+time_t debug_expired_reply_ttl_calc(time_t ttl, time_t ttl_add) {
+	/* Check that we are serving expired when this is called */
+	/* ttl (absolute) should be later than ttl_add */
+	/* It is also called during the grace period for type DNAME,
+	 * and then the 'SERVE_EXPIRED' boolean may not be on. */
+	log_assert(ttl_add <= ttl);
+	return (SERVE_EXPIRED_REPLY_TTL < (ttl) - (ttl_add) ?
+		SERVE_EXPIRED_REPLY_TTL : (ttl) - (ttl_add));
+}
+#endif

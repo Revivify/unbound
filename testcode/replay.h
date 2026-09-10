@@ -74,18 +74,20 @@
  *	o CHECK_ANSWER - followed by entry
  *	o CHECK_OUT_QUERY - followed by entry (if copy-id it is also reply).
  *	o REPLY - followed by entry
- *      o TIMEOUT
- *      o TIME_PASSES ELAPSE [seconds] - increase 'now' time counter, can be 
- *      			a floating point number.
- *        TIME_PASSES EVAL [macro] - expanded for seconds to move time.
- *      o TRAFFIC - like CHECK_ANSWER, causes traffic to flow.
+ *	o TIMEOUT
+ *	o TIME_PASSES ELAPSE [seconds] - increase 'now' time counter, can be
+ *		a floating point number.
+ *	  TIME_PASSES EVAL [macro] - expanded for seconds to move time.
+ *	o TRAFFIC - like CHECK_ANSWER, causes traffic to flow.
  *		actually the traffic flows before this step is taken.
  *		the step waits for traffic to stop.
- *      o CHECK_AUTOTRUST [id] - followed by FILE_BEGIN [to match] FILE_END.
- *      	The file contents is macro expanded before match.
- *      o CHECK_TEMPFILE [fname] - followed by FILE_BEGIN [to match] FILE_END
- *      o INFRA_RTT [ip] [dp] [rtt] - update infra cache entry with rtt.
- *      o ERROR
+ *	o CHECK_AUTOTRUST [id] - followed by FILE_BEGIN [to match] FILE_END.
+ *		The file contents is macro expanded before match.
+ *	o CHECK_TEMPFILE [fname] - followed by FILE_BEGIN [to match] FILE_END
+ *	o INFRA_RTT [ip] [dp] [rtt] - update infra cache entry with rtt.
+ *	o FLUSH_MESSAGE name type class - flushes entry in message cache.
+ *	o EXPIRE_MESSAGE name type class - expires entry in message cache.
+ *	o ERROR
  * ; following entry starts on the next line, ENTRY_BEGIN.
  * ; more STEP items
  * SCENARIO_END
@@ -140,6 +142,10 @@
 #include "util/netevent.h"
 #include "testcode/testpkts.h"
 #include "util/rbtree.h"
+#ifdef __QNX__
+/* For struct timeval */
+#include <sys/time.h>
+#endif /* __QNX__ */
 struct replay_answer;
 struct replay_moment;
 struct replay_range;
@@ -148,6 +154,7 @@ struct fake_timer;
 struct replay_var;
 struct infra_cache;
 struct sldns_buffer;
+struct daemon;
 
 /**
  * A replay scenario.
@@ -212,6 +219,10 @@ struct replay_moment {
 		repevt_assign,
 		/** store infra rtt cache entry: addr and string (int) */
 		repevt_infra_rtt,
+		/** flush message cache entry */
+		repevt_flush_message,
+		/** expire message cache entry */
+		repevt_expire_message,
 		/** cause traffic to flow */
 		repevt_traffic
 	}
@@ -297,6 +308,8 @@ struct replay_runtime {
 
 	/** ref the infra cache (was passed to outside_network_create) */
 	struct infra_cache* infra;
+	/** the daemon structure passed in worker call to remote accept open */
+	struct daemon* daemon;
 
 	/** the current time in seconds */
 	time_t now_secs;
@@ -424,6 +437,9 @@ int replay_var_compare(const void* a, const void* b);
 
 /** get oldest enabled fake timer */
 struct fake_timer* replay_get_oldest_timer(struct replay_runtime* runtime);
+
+/** strip whitespace from end of string */
+void strip_end_white(char* p);
 
 /**
  * Create variable storage

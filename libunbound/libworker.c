@@ -62,6 +62,7 @@
 #include "util/random.h"
 #include "util/config_file.h"
 #include "util/netevent.h"
+#include "util/proxy_protocol.h"
 #include "util/storage/lookup3.h"
 #include "util/storage/slabhash.h"
 #include "util/net_help.h"
@@ -69,10 +70,19 @@
 #include "util/data/msgreply.h"
 #include "util/data/msgencode.h"
 #include "util/tube.h"
-#include "iterator/iter_fwd.h"
-#include "iterator/iter_hints.h"
 #include "sldns/sbuffer.h"
 #include "sldns/str2wire.h"
+#ifdef USE_DNSTAP
+#include "dnstap/dtstream.h"
+#endif
+
+#ifdef HAVE_TARGETCONDITIONALS_H
+#include <TargetConditionals.h>
+#endif
+
+#if (defined(TARGET_OS_TV) && TARGET_OS_TV) || (defined(TARGET_OS_WATCH) && TARGET_OS_WATCH)
+#undef HAVE_FORK
+#endif
 
 /** handle new query command for bg worker */
 static void handle_newq(struct libworker* w, uint8_t* buf, uint32_t len);
@@ -88,8 +98,6 @@ libworker_delete_env(struct libworker* w)
 			!w->is_bg || w->is_bg_thread);
 		sldns_buffer_free(w->env->scratch_buffer);
 		regional_destroy(w->env->scratch);
-		forwards_delete(w->env->fwds);
-		hints_delete(w->env->hints);
 		ub_randfree(w->env->rnd);
 		free(w->env);
 	}
@@ -97,6 +105,7 @@ libworker_delete_env(struct libworker* w)
 	SSL_CTX_free(w->sslctx);
 #endif
 	outside_network_delete(w->back);
+	shared_ports_delete(w->shared_ports);
 }
 
 /** delete libworker struct */
@@ -122,7 +131,6 @@ libworker_delete_event(struct libworker* w)
 static struct libworker*
 libworker_setup(struct ub_ctx* ctx, int is_bg, struct ub_event_base* eb)
 {
-	unsigned int seed;
 	struct libworker* w = (struct libworker*)calloc(1, sizeof(*w));
 	struct config_file* cfg = ctx->env->cfg;
 	int* ports;
@@ -148,46 +156,31 @@ libworker_setup(struct ub_ctx* ctx, int is_bg, struct ub_event_base* eb)
 	}
 	w->env->scratch = regional_create_custom(cfg->msg_buffer_size);
 	w->env->scratch_buffer = sldns_buffer_new(cfg->msg_buffer_size);
-	w->env->fwds = forwards_create();
-	if(w->env->fwds && !forwards_apply_cfg(w->env->fwds, cfg)) { 
-		forwards_delete(w->env->fwds);
-		w->env->fwds = NULL;
+#ifdef HAVE_SSL
+	w->sslctx = connect_sslctx_create(NULL, NULL,
+		cfg->tls_cert_bundle, cfg->tls_win_cert);
+	if(!w->sslctx) {
+		/* to make the setup fail after unlock */
+		sldns_buffer_free(w->env->scratch_buffer);
+		w->env->scratch_buffer = NULL;
 	}
-	w->env->hints = hints_create();
-	if(w->env->hints && !hints_apply_cfg(w->env->hints, cfg)) { 
-		hints_delete(w->env->hints);
-		w->env->hints = NULL;
-	}
-	if(cfg->ssl_upstream || (cfg->tls_cert_bundle && cfg->tls_cert_bundle[0]) || cfg->tls_win_cert) {
-		w->sslctx = connect_sslctx_create(NULL, NULL,
-			cfg->tls_cert_bundle, cfg->tls_win_cert);
-		if(!w->sslctx) {
-			/* to make the setup fail after unlock */
-			hints_delete(w->env->hints);
-			w->env->hints = NULL;
-		}
-	}
+#endif
 	if(!w->is_bg || w->is_bg_thread) {
 		lock_basic_unlock(&ctx->cfglock);
 	}
-	if(!w->env->scratch || !w->env->scratch_buffer || !w->env->fwds ||
-		!w->env->hints) {
+	if(!w->env->scratch || !w->env->scratch_buffer) {
 		libworker_delete(w);
 		return NULL;
 	}
 	w->env->worker = (struct worker*)w;
 	w->env->probe_timer = NULL;
-	seed = (unsigned int)time(NULL) ^ (unsigned int)getpid() ^
-		(((unsigned int)w->thread_num)<<17);
-	seed ^= (unsigned int)w->env->alloc->next_id;
 	if(!w->is_bg || w->is_bg_thread) {
 		lock_basic_lock(&ctx->cfglock);
 	}
-	if(!(w->env->rnd = ub_initstate(seed, ctx->seed_rnd))) {
+	if(!(w->env->rnd = ub_initstate(ctx->seed_rnd))) {
 		if(!w->is_bg || w->is_bg_thread) {
 			lock_basic_unlock(&ctx->cfglock);
 		}
-		explicit_bzero(&seed, sizeof(seed));
 		libworker_delete(w);
 		return NULL;
 	}
@@ -207,7 +200,6 @@ libworker_setup(struct ub_ctx* ctx, int is_bg, struct ub_event_base* eb)
 			hash_set_raninit((uint32_t)ub_random(w->env->rnd));
 		}
 	}
-	explicit_bzero(&seed, sizeof(seed));
 
 	if(eb)
 		w->base = comm_base_create_event(eb);
@@ -228,15 +220,25 @@ libworker_setup(struct ub_ctx* ctx, int is_bg, struct ub_event_base* eb)
 		libworker_delete(w);
 		return NULL;
 	}
+	if(!(w->shared_ports = shared_ports_create(cfg->out_ifs,
+		cfg->num_out_ifs, cfg->do_ip4, cfg->do_ip6, ports, numports))) {
+		if(!w->is_bg || w->is_bg_thread) {
+			lock_basic_unlock(&ctx->cfglock);
+		}
+		libworker_delete(w);
+		return NULL;
+	}
 	w->back = outside_network_create(w->base, cfg->msg_buffer_size,
 		(size_t)cfg->outgoing_num_ports, cfg->out_ifs,
 		cfg->num_out_ifs, cfg->do_ip4, cfg->do_ip6, 
-		cfg->do_tcp?cfg->outgoing_num_tcp:0,
+		cfg->do_tcp?cfg->outgoing_num_tcp:0, cfg->ip_dscp,
 		w->env->infra_cache, w->env->rnd, cfg->use_caps_bits_for_id,
-		ports, numports, cfg->unwanted_threshold,
+		cfg->unwanted_threshold,
 		cfg->outgoing_tcp_mss, &libworker_alloc_cleanup, w,
 		cfg->do_udp || cfg->udp_upstream_without_downstream, w->sslctx,
-		cfg->delay_close, NULL);
+		cfg->delay_close, cfg->tls_use_sni, NULL, cfg->udp_connect,
+		cfg->max_reuse_tcp_queries, cfg->tcp_reuse_timeout,
+		cfg->tcp_auth_query_timeout, w->shared_ports);
 	w->env->outnet = w->back;
 	if(!w->is_bg || w->is_bg_thread) {
 		lock_basic_unlock(&ctx->cfglock);
@@ -258,6 +260,7 @@ libworker_setup(struct ub_ctx* ctx, int is_bg, struct ub_event_base* eb)
 	w->env->kill_sub = &mesh_state_delete;
 	w->env->detect_cycle = &mesh_detect_cycle;
 	comm_base_timept(w->base, &w->env->now, &w->env->now_tv);
+	pp_init(&sldns_write_uint16, &sldns_write_uint32);
 	return w;
 }
 
@@ -298,6 +301,7 @@ libworker_do_cmd(struct libworker* w, uint8_t* msg, uint32_t len)
 			log_err("unknown command for bg worker %d", 
 				(int)context_serial_getcmd(msg, len));
 			/* and fall through to quit */
+			ATTR_FALLTHROUGH
 			/* fallthrough */
 		case UB_LIBCMD_QUIT:
 			free(msg);
@@ -388,6 +392,7 @@ int libworker_bg(struct ub_ctx* ctx)
 		w = libworker_setup(ctx, 1, NULL);
 		if(!w) return UB_NOMEM;
 		w->is_bg_thread = 1;
+		ctx->thread_worker = w;
 #ifdef ENABLE_LOCK_CHECKS
 		w->thread_num = 1; /* for nicer DEBUG checklocks */
 #endif
@@ -427,7 +432,7 @@ int libworker_bg(struct ub_ctx* ctx)
 static int
 fill_canon(struct ub_result* res, uint8_t* s)
 {
-	char buf[255+2];
+	char buf[LDNS_MAX_DOMAINLEN];
 	dname_str(s, buf);
 	res->canonname = strdup(buf);
 	return res->canonname != 0;
@@ -449,8 +454,15 @@ fill_res(struct ub_result* res, struct ub_packed_rrset_key* answer,
 		if(rep->rrset_count != 0)
 			res->ttl = (int)rep->ttl;
 		res->data = (char**)calloc(1, sizeof(char*));
+		if(!res->data)
+			return 0; /* out of memory */
 		res->len = (int*)calloc(1, sizeof(int));
-		return (res->data && res->len);
+		if(!res->len) {
+			free(res->data);
+			res->data = NULL;
+			return 0; /* out of memory */
+		}
+		return 1;
 	}
 	data = (struct packed_rrset_data*)answer->entry.data;
 	if(query_dname_compare(rq->qname, answer->rk.dname) != 0) {
@@ -458,15 +470,30 @@ fill_res(struct ub_result* res, struct ub_packed_rrset_key* answer,
 			return 0; /* out of memory */
 	} else	res->canonname = NULL;
 	res->data = (char**)calloc(data->count+1, sizeof(char*));
-	res->len = (int*)calloc(data->count+1, sizeof(int));
-	if(!res->data || !res->len)
+	if(!res->data)
 		return 0; /* out of memory */
+	res->len = (int*)calloc(data->count+1, sizeof(int));
+	if(!res->len) {
+		free(res->data);
+		res->data = NULL;
+		return 0; /* out of memory */
+	}
 	for(i=0; i<data->count; i++) {
 		/* remove rdlength from rdata */
 		res->len[i] = (int)(data->rr_len[i] - 2);
 		res->data[i] = memdup(data->rr_data[i]+2, (size_t)res->len[i]);
-		if(!res->data[i])
+		if(!res->data[i]) {
+			size_t j;
+			for(j=0; j<i; j++) {
+				free(res->data[j]);
+				res->data[j] = NULL;
+			}
+			free(res->data);
+			res->data = NULL;
+			free(res->len);
+			res->len = NULL;
 			return 0; /* out of memory */
+		}
 	}
 	/* ttl for positive answers, from CNAME and answer RRs */
 	if(data->count != 0) {
@@ -532,7 +559,7 @@ libworker_fillup_fg(struct ctx_query* q, int rcode, sldns_buffer* buf,
 	}
 
 	q->res->rcode = LDNS_RCODE_SERVFAIL;
-	q->msg_security = 0;
+	q->msg_security = sec_status_unchecked;
 	q->msg = memdup(sldns_buffer_begin(buf), sldns_buffer_limit(buf));
 	q->msg_len = sldns_buffer_limit(buf);
 	if(!q->msg) {
@@ -567,12 +594,16 @@ setup_qinfo_edns(struct libworker* w, struct ctx_query* q,
 	if(!qinfo->qname) {
 		return 0;
 	}
-	qinfo->local_alias = NULL;
 	edns->edns_present = 1;
 	edns->ext_rcode = 0;
 	edns->edns_version = 0;
 	edns->bits = EDNS_DO;
-	edns->opt_list = NULL;
+	edns->opt_list_in = NULL;
+	edns->opt_list_out = NULL;
+	edns->opt_list_inplace_cb_out = NULL;
+	edns->padding_block_size = 0;
+	edns->cookie_present = 0;
+	edns->cookie_valid = 0;
 	if(sldns_buffer_capacity(w->back->udp_buff) < 65535)
 		edns->udp_size = (uint16_t)sldns_buffer_capacity(
 			w->back->udp_buff);
@@ -608,8 +639,9 @@ int libworker_fg(struct ub_ctx* ctx, struct ctx_query* q)
 		free(qinfo.qname);
 		return UB_NOERROR;
 	}
-	if(ctx->env->auth_zones && auth_zones_answer(ctx->env->auth_zones,
-		w->env, &qinfo, &edns, NULL, w->back->udp_buff, w->env->scratch)) {
+	if(ctx->env->auth_zones && auth_zones_downstream_answer(
+		ctx->env->auth_zones, w->env, &qinfo, &edns, NULL,
+		w->back->udp_buff, w->env->scratch)) {
 		regional_free_all(w->env->scratch);
 		libworker_fillup_fg(q, LDNS_RCODE_NOERROR, 
 			w->back->udp_buff, sec_status_insecure, NULL, 0);
@@ -619,7 +651,8 @@ int libworker_fg(struct ub_ctx* ctx, struct ctx_query* q)
 	}
 	/* process new query */
 	if(!mesh_new_callback(w->env->mesh, &qinfo, qflags, &edns, 
-		w->back->udp_buff, qid, libworker_fg_done_cb, q)) {
+		w->back->udp_buff, qid, libworker_fg_done_cb, q, 0,
+		&q->unique_info)) {
 		free(qinfo.qname);
 		return UB_NOMEM;
 	}
@@ -687,8 +720,9 @@ int libworker_attach_mesh(struct ub_ctx* ctx, struct ctx_query* q,
 			w->back->udp_buff, sec_status_insecure, NULL, 0);
 		return UB_NOERROR;
 	}
-	if(ctx->env->auth_zones && auth_zones_answer(ctx->env->auth_zones,
-		w->env, &qinfo, &edns, NULL, w->back->udp_buff, w->env->scratch)) {
+	if(ctx->env->auth_zones && auth_zones_downstream_answer(
+		ctx->env->auth_zones, w->env, &qinfo, &edns, NULL,
+		w->back->udp_buff, w->env->scratch)) {
 		regional_free_all(w->env->scratch);
 		free(qinfo.qname);
 		libworker_event_done_cb(q, LDNS_RCODE_NOERROR,
@@ -699,7 +733,8 @@ int libworker_attach_mesh(struct ub_ctx* ctx, struct ctx_query* q,
 	if(async_id)
 		*async_id = q->querynum;
 	if(!mesh_new_callback(w->env->mesh, &qinfo, qflags, &edns, 
-		w->back->udp_buff, qid, libworker_event_done_cb, q)) {
+		w->back->udp_buff, qid, libworker_event_done_cb, q, 0,
+		&q->unique_info)) {
 		free(qinfo.qname);
 		return UB_NOMEM;
 	}
@@ -825,8 +860,9 @@ handle_newq(struct libworker* w, uint8_t* buf, uint32_t len)
 		free(qinfo.qname);
 		return;
 	}
-	if(w->ctx->env->auth_zones && auth_zones_answer(w->ctx->env->auth_zones,
-		w->env, &qinfo, &edns, NULL, w->back->udp_buff, w->env->scratch)) {
+	if(w->ctx->env->auth_zones && auth_zones_downstream_answer(
+		w->ctx->env->auth_zones, w->env, &qinfo, &edns, NULL,
+		w->back->udp_buff, w->env->scratch)) {
 		regional_free_all(w->env->scratch);
 		q->msg_security = sec_status_insecure;
 		add_bg_result(w, q, w->back->udp_buff, UB_NOERROR, NULL, 0);
@@ -836,7 +872,8 @@ handle_newq(struct libworker* w, uint8_t* buf, uint32_t len)
 	q->w = w;
 	/* process new query */
 	if(!mesh_new_callback(w->env->mesh, &qinfo, qflags, &edns, 
-		w->back->udp_buff, qid, libworker_bg_done_cb, q)) {
+		w->back->udp_buff, qid, libworker_bg_done_cb, q, 0,
+		&q->unique_info)) {
 		add_bg_result(w, q, NULL, UB_NOMEM, NULL, 0);
 	}
 	free(qinfo.qname);
@@ -851,9 +888,11 @@ void libworker_alloc_cleanup(void* arg)
 
 struct outbound_entry* libworker_send_query(struct query_info* qinfo,
 	uint16_t flags, int dnssec, int want_dnssec, int nocaps,
+	int check_ratelimit,
 	struct sockaddr_storage* addr, socklen_t addrlen, uint8_t* zone,
-	size_t zonelen, int ssl_upstream, char* tls_auth_name,
-	struct module_qstate* q)
+	size_t zonelen, int tcp_upstream, int ssl_upstream, char* tls_auth_name,
+	struct module_qstate* q, int* was_ratelimited,
+	int* ratelimit_incremented)
 {
 	struct libworker* w = (struct libworker*)q->env->worker;
 	struct outbound_entry* e = (struct outbound_entry*)regional_alloc(
@@ -862,42 +901,14 @@ struct outbound_entry* libworker_send_query(struct query_info* qinfo,
 		return NULL;
 	e->qstate = q;
 	e->qsent = outnet_serviced_query(w->back, qinfo, flags, dnssec,
-		want_dnssec, nocaps, q->env->cfg->tcp_upstream, ssl_upstream,
+		want_dnssec, nocaps, check_ratelimit, tcp_upstream, ssl_upstream,
 		tls_auth_name, addr, addrlen, zone, zonelen, q,
-		libworker_handle_service_reply, e, w->back->udp_buff, q->env);
+		libworker_handle_service_reply, e, w->back->udp_buff, q->env,
+		was_ratelimited, ratelimit_incremented);
 	if(!e->qsent) {
 		return NULL;
 	}
 	return e;
-}
-
-int 
-libworker_handle_reply(struct comm_point* c, void* arg, int error,
-        struct comm_reply* reply_info)
-{
-	struct module_qstate* q = (struct module_qstate*)arg;
-	struct libworker* lw = (struct libworker*)q->env->worker;
-	struct outbound_entry e;
-	e.qstate = q;
-	e.qsent = NULL;
-
-	if(error != 0) {
-		mesh_report_reply(lw->env->mesh, &e, reply_info, error);
-		return 0;
-	}
-	/* sanity check. */
-	if(!LDNS_QR_WIRE(sldns_buffer_begin(c->buffer))
-		|| LDNS_OPCODE_WIRE(sldns_buffer_begin(c->buffer)) !=
-			LDNS_PACKET_QUERY
-		|| LDNS_QDCOUNT(sldns_buffer_begin(c->buffer)) > 1) {
-		/* error becomes timeout for the module as if this reply
-		 * never arrived. */
-		mesh_report_reply(lw->env->mesh, &e, reply_info, 
-			NETEVENT_TIMEOUT);
-		return 0;
-	}
-	mesh_report_reply(lw->env->mesh, &e, reply_info, NETEVENT_NOERROR);
-	return 0;
 }
 
 int 
@@ -942,14 +953,6 @@ int worker_handle_request(struct comm_point* ATTR_UNUSED(c),
 	return 0;
 }
 
-int worker_handle_reply(struct comm_point* ATTR_UNUSED(c), 
-	void* ATTR_UNUSED(arg), int ATTR_UNUSED(error),
-        struct comm_reply* ATTR_UNUSED(reply_info))
-{
-	log_assert(0);
-	return 0;
-}
-
 int worker_handle_service_reply(struct comm_point* ATTR_UNUSED(c), 
 	void* ATTR_UNUSED(arg), int ATTR_UNUSED(error),
         struct comm_reply* ATTR_UNUSED(reply_info))
@@ -982,10 +985,12 @@ void worker_sighandler(int ATTR_UNUSED(sig), void* ATTR_UNUSED(arg))
 struct outbound_entry* worker_send_query(struct query_info* ATTR_UNUSED(qinfo),
 	uint16_t ATTR_UNUSED(flags), int ATTR_UNUSED(dnssec),
 	int ATTR_UNUSED(want_dnssec), int ATTR_UNUSED(nocaps),
+	int ATTR_UNUSED(check_ratelimit),
 	struct sockaddr_storage* ATTR_UNUSED(addr), socklen_t ATTR_UNUSED(addrlen),
-	uint8_t* ATTR_UNUSED(zone), size_t ATTR_UNUSED(zonelen),
+	uint8_t* ATTR_UNUSED(zone), size_t ATTR_UNUSED(zonelen), int ATTR_UNUSED(tcp_upstream),
 	int ATTR_UNUSED(ssl_upstream), char* ATTR_UNUSED(tls_auth_name),
-	struct module_qstate* ATTR_UNUSED(q))
+	struct module_qstate* ATTR_UNUSED(q), int* ATTR_UNUSED(was_ratelimited),
+	int* ATTR_UNUSED(ratelimit_incremented))
 {
 	log_assert(0);
 	return 0;
@@ -1054,3 +1059,49 @@ wsvc_cron_cb(void* ATTR_UNUSED(arg))
         log_assert(0);
 }
 #endif /* UB_ON_WINDOWS */
+
+#ifdef USE_DNSTAP
+void dtio_tap_callback(int ATTR_UNUSED(fd), short ATTR_UNUSED(ev),
+	void* ATTR_UNUSED(arg))
+{
+	log_assert(0);
+}
+#endif
+
+#ifdef USE_DNSTAP
+void dtio_mainfdcallback(int ATTR_UNUSED(fd), short ATTR_UNUSED(ev),
+	void* ATTR_UNUSED(arg))
+{
+	log_assert(0);
+}
+#endif
+
+void fast_reload_service_cb(int ATTR_UNUSED(fd), short ATTR_UNUSED(ev),
+	void* ATTR_UNUSED(arg))
+{
+	log_assert(0);
+}
+
+int fast_reload_client_callback(struct comm_point* ATTR_UNUSED(c),
+	void* ATTR_UNUSED(arg), int ATTR_UNUSED(error),
+        struct comm_reply* ATTR_UNUSED(repinfo))
+{
+	log_assert(0);
+	return 0;
+}
+
+#ifdef HAVE_NGTCP2
+void doq_client_event_cb(int ATTR_UNUSED(fd), short ATTR_UNUSED(ev),
+	void* ATTR_UNUSED(arg))
+{
+	log_assert(0);
+}
+#endif
+
+#ifdef HAVE_NGTCP2
+void doq_client_timer_cb(int ATTR_UNUSED(fd), short ATTR_UNUSED(ev),
+	void* ATTR_UNUSED(arg))
+{
+	log_assert(0);
+}
+#endif

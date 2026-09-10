@@ -151,9 +151,75 @@
 #define HTTPS_PORT 443
 
 #ifdef USE_WINSOCK
-/* sneakily reuse the the wsa_strerror function, on windows */
+/* sneakily reuse the wsa_strerror function, on windows */
 char* wsa_strerror(int err);
 #endif
+
+static const char ICANN_UPDATE_CA[] =
+	/* The ICANN CA fetched at 29 May 2026. Valid to 20 Mar 2045 */
+	"-----BEGIN CERTIFICATE-----\n"
+	"MIIDdzCCAl+gAwIBAgIBATANBgkqhkiG9w0BAQsFADBdMQ4wDAYDVQQKEwVJQ0FO\n"
+	"TjEmMCQGA1UECxMdSUNBTk4gQ2VydGlmaWNhdGlvbiBBdXRob3JpdHkxFjAUBgNV\n"
+	"BAMTDUlDQU5OIFJvb3QgQ0ExCzAJBgNVBAYTAlVTMB4XDTA5MTIyMzA0MTkxMloX\n"
+	"DTI5MTIxODA0MTkxMlowXTEOMAwGA1UEChMFSUNBTk4xJjAkBgNVBAsTHUlDQU5O\n"
+	"IENlcnRpZmljYXRpb24gQXV0aG9yaXR5MRYwFAYDVQQDEw1JQ0FOTiBSb290IENB\n"
+	"MQswCQYDVQQGEwJVUzCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAKDb\n"
+	"cLhPNNqc1NB+u+oVvOnJESofYS9qub0/PXagmgr37pNublVThIzyLPGCJ8gPms9S\n"
+	"G1TaKNIsMI7d+5IgMy3WyPEOECGIcfqEIktdR1YWfJufXcMReZwU4v/AdKzdOdfg\n"
+	"ONiwc6r70duEr1IiqPbVm5T05l1e6D+HkAvHGnf1LtOPGs4CHQdpIUcy2kauAEy2\n"
+	"paKcOcHASvbTHK7TbbvHGPB+7faAztABLoneErruEcumetcNfPMIjXKdv1V1E3C7\n"
+	"MSJKy+jAqqQJqjZoQGB0necZgUMiUv7JK1IPQRM2CXJllcyJrm9WFxY0c1KjBO29\n"
+	"iIKK69fcglKcBuFShUECAwEAAaNCMEAwDwYDVR0TAQH/BAUwAwEB/zAOBgNVHQ8B\n"
+	"Af8EBAMCAf4wHQYDVR0OBBYEFLpS6UmDJIZSL8eZzfyNa2kITcBQMA0GCSqGSIb3\n"
+	"DQEBCwUAA4IBAQAP8emCogqHny2UYFqywEuhLys7R9UKmYY4suzGO4nkbgfPFMfH\n"
+	"6M+Zj6owwxlwueZt1j/IaCayoKU3QsrYYoDRolpILh+FPwx7wseUEV8ZKpWsoDoD\n"
+	"2JFbLg2cfB8u/OlE4RYmcxxFSmXBg0yQ8/IoQt/bxOcEEhhiQ168H2yE5rxJMt9h\n"
+	"15nu5JBSewrCkYqYYmaxyOC3WrVGfHZxVI7MpIFcGdvSb2a1uyuua8l0BKgk3ujF\n"
+	"0/wsHNeP22qNyVO+XVBzrM8fk8BSUFuiT/6tZTYXRtEt5aKQZgXbKU5dUF3jT9qg\n"
+	"j/Br5BZw3X/zd325TvnswzMC1+ljLzHnQGGk\n"
+	"-----END CERTIFICATE-----\n"
+	"\n"
+	"-----BEGIN CERTIFICATE-----\n"
+	"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\n"
+	"pMnwChV9468oRE20bdqq9+Go7g4E\n"
+	"-----END CERTIFICATE-----\n";
+
+static const char DS_TRUST_ANCHOR[] =
+	/* The anchors must start on a new line with ". IN DS and end with \n"[;]
+	 * because the makedist script greps on the source here */
+	/* anchor 20326 is from 2017 */
+". IN DS 20326 8 2 E06D44B80B8F1D39A95C0B0D7C65D08458E880409BBC683457104237C7F8EC8D\n"
+	/* anchor 38696 is from 2024 */
+". IN DS 38696 8 2 683D2D0ACB8C9B712A1948B27F741219298D0A450D612C483AF444A4C0FB2B16\n";
 
 /** verbosity for this application */
 static int verb = 0;
@@ -187,9 +253,11 @@ usage(void)
 	printf("-c file		cert file, default %s\n", ROOT_CERT_FILE);
 	printf("-l		list builtin key and cert on stdout\n");
 	printf("-u name		server in https url, default %s\n", URLNAME);
+	printf("-S		do not use SNI for the https connection\n");
 	printf("-x path		pathname to xml in url, default %s\n", XMLNAME);
 	printf("-s path		pathname to p7s in url, default %s\n", P7SNAME);
 	printf("-n name		signer's subject emailAddress, default %s\n", P7SIGNER);
+	printf("-b address	source address to bind to\n");
 	printf("-4		work using IPv4 only\n");
 	printf("-6		work using IPv6 only\n");
 	printf("-f resolv.conf	use given resolv.conf\n");
@@ -211,50 +279,21 @@ usage(void)
 static const char*
 get_builtin_cert(void)
 {
-	return
-/* The ICANN CA fetched at 24 Sep 2010.  Valid to 2028 */
-"-----BEGIN CERTIFICATE-----\n"
-"MIIDdzCCAl+gAwIBAgIBATANBgkqhkiG9w0BAQsFADBdMQ4wDAYDVQQKEwVJQ0FO\n"
-"TjEmMCQGA1UECxMdSUNBTk4gQ2VydGlmaWNhdGlvbiBBdXRob3JpdHkxFjAUBgNV\n"
-"BAMTDUlDQU5OIFJvb3QgQ0ExCzAJBgNVBAYTAlVTMB4XDTA5MTIyMzA0MTkxMloX\n"
-"DTI5MTIxODA0MTkxMlowXTEOMAwGA1UEChMFSUNBTk4xJjAkBgNVBAsTHUlDQU5O\n"
-"IENlcnRpZmljYXRpb24gQXV0aG9yaXR5MRYwFAYDVQQDEw1JQ0FOTiBSb290IENB\n"
-"MQswCQYDVQQGEwJVUzCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAKDb\n"
-"cLhPNNqc1NB+u+oVvOnJESofYS9qub0/PXagmgr37pNublVThIzyLPGCJ8gPms9S\n"
-"G1TaKNIsMI7d+5IgMy3WyPEOECGIcfqEIktdR1YWfJufXcMReZwU4v/AdKzdOdfg\n"
-"ONiwc6r70duEr1IiqPbVm5T05l1e6D+HkAvHGnf1LtOPGs4CHQdpIUcy2kauAEy2\n"
-"paKcOcHASvbTHK7TbbvHGPB+7faAztABLoneErruEcumetcNfPMIjXKdv1V1E3C7\n"
-"MSJKy+jAqqQJqjZoQGB0necZgUMiUv7JK1IPQRM2CXJllcyJrm9WFxY0c1KjBO29\n"
-"iIKK69fcglKcBuFShUECAwEAAaNCMEAwDwYDVR0TAQH/BAUwAwEB/zAOBgNVHQ8B\n"
-"Af8EBAMCAf4wHQYDVR0OBBYEFLpS6UmDJIZSL8eZzfyNa2kITcBQMA0GCSqGSIb3\n"
-"DQEBCwUAA4IBAQAP8emCogqHny2UYFqywEuhLys7R9UKmYY4suzGO4nkbgfPFMfH\n"
-"6M+Zj6owwxlwueZt1j/IaCayoKU3QsrYYoDRolpILh+FPwx7wseUEV8ZKpWsoDoD\n"
-"2JFbLg2cfB8u/OlE4RYmcxxFSmXBg0yQ8/IoQt/bxOcEEhhiQ168H2yE5rxJMt9h\n"
-"15nu5JBSewrCkYqYYmaxyOC3WrVGfHZxVI7MpIFcGdvSb2a1uyuua8l0BKgk3ujF\n"
-"0/wsHNeP22qNyVO+XVBzrM8fk8BSUFuiT/6tZTYXRtEt5aKQZgXbKU5dUF3jT9qg\n"
-"j/Br5BZw3X/zd325TvnswzMC1+ljLzHnQGGk\n"
-"-----END CERTIFICATE-----\n"
-		;
+	return ICANN_UPDATE_CA;
 }
 
 /** return the built in root DS trust anchor */
 static const char*
 get_builtin_ds(void)
 {
-	return
-/* The anchors must start on a new line with ". IN DS and end with \n"[;]
- * because the makedist script greps on the source here */
-/* anchor 19036 is from 2010 */
-/* anchor 20326 is from 2017 */
-". IN DS 19036 8 2 49AAC11D7B6F6446702E54A1607371607A1A41855200FD2CE1CDDE32F24E8FB5\n"
-". IN DS 20326 8 2 E06D44B80B8F1D39A95C0B0D7C65D08458E880409BBC683457104237C7F8EC8D\n";
+	return DS_TRUST_ANCHOR;
 }
 
 /** print hex data */
 static void
-print_data(const char* msg, const char* data, int len)
+print_data(const char* msg, const char* data, size_t len)
 {
-	int i;
+	size_t i;
 	printf("%s: ", msg);
 	for(i=0; i<len; i++) {
 		printf(" %2.2x", (unsigned char)data[i]);
@@ -277,7 +316,7 @@ ub_ctx_error_exit(struct ub_ctx* ctx, const char* str, const char* str2)
  */
 static struct ub_ctx* 
 create_unbound_context(const char* res_conf, const char* root_hints,
-	const char* debugconf, int ip4only, int ip6only)
+	const char* debugconf, const char* srcaddr, int ip4only, int ip6only)
 {
 	int r;
 	struct ub_ctx* ctx = ub_ctx_create();
@@ -300,6 +339,10 @@ create_unbound_context(const char* res_conf, const char* root_hints,
 	if(root_hints) {
 		r = ub_ctx_set_option(ctx, "root-hints:", root_hints);
 		if(r) ub_ctx_error_exit(ctx, root_hints, ub_strerror(r));
+	}
+	if(srcaddr) {
+		r = ub_ctx_set_option(ctx, "outgoing-interface:", srcaddr);
+		if(r) ub_ctx_error_exit(ctx, srcaddr, ub_strerror(r));
 	}
 	if(ip4only) {
 		r = ub_ctx_set_option(ctx, "do-ip6:", "no");
@@ -350,7 +393,7 @@ read_cert_bio(BIO* bio)
 		exit(0);
 	}
 	while(!BIO_eof(bio)) {
-		X509* x = PEM_read_bio_X509(bio, NULL, 0, NULL);
+		X509* x = PEM_read_bio_X509(bio, NULL, NULL, NULL);
 		if(x == NULL) {
 			if(verb) {
 				printf("failed to read X509\n");
@@ -373,7 +416,7 @@ read_cert_file(const char* file)
 	STACK_OF(X509)* sk;
 	FILE* in;
 	int content = 0;
-	char buf[128];
+	long flen;
 	if(file == NULL || strcmp(file, "") == 0) {
 		return NULL;
 	}
@@ -390,8 +433,13 @@ read_cert_file(const char* file)
 #endif
 		return NULL;
 	}
+	if(fseek(in, 0, SEEK_END) < 0)
+		printf("%s fseek: %s\n", file, strerror(errno));
+	flen = ftell(in);
+	if(fseek(in, 0, SEEK_SET) < 0)
+		printf("%s fseek: %s\n", file, strerror(errno));
 	while(!feof(in)) {
-		X509* x = PEM_read_X509(in, NULL, 0, NULL);
+		X509* x = PEM_read_X509(in, NULL, NULL, NULL);
 		if(x == NULL) {
 			if(verb) {
 				printf("failed to read X509 file\n");
@@ -405,8 +453,9 @@ read_cert_file(const char* file)
 			exit(0);
 		}
 		content = 1;
-		/* read away newline after --END CERT-- */
-		if(!fgets(buf, (int)sizeof(buf), in))
+		/* feof may not be true yet, but if the position is
+		 * at end of file, stop reading more certificates. */
+		if(ftell(in) == flen)
 			break;
 	}
 	fclose(in);
@@ -620,6 +669,7 @@ parse_ip_addr(const char* str, int port)
  * @param res_conf: resolv.conf (if any).
  * @param root_hints: root hints (if any).
  * @param debugconf: unbound.conf for debugging options.
+ * @param srcaddr: source address option (if any).
  * @param ip4only: use only ip4 for resolve and only lookup A
  * @param ip6only: use only ip6 for resolve and only lookup AAAA
  * 	default is to lookup A and AAAA using ip4 and ip6.
@@ -627,7 +677,8 @@ parse_ip_addr(const char* str, int port)
  */
 static struct ip_list*
 resolve_name(const char* host, int port, const char* res_conf,
-	const char* root_hints, const char* debugconf, int ip4only, int ip6only)
+	const char* root_hints, const char* debugconf,
+	const char* srcaddr, int ip4only, int ip6only)
 {
 	struct ub_ctx* ctx;
 	struct ip_list* list = NULL;
@@ -638,7 +689,7 @@ resolve_name(const char* host, int port, const char* res_conf,
 	
 	/* create resolver context */
 	ctx = create_unbound_context(res_conf, root_hints, debugconf,
-        	ip4only, ip6only);
+        	srcaddr, ip4only, ip6only);
 
 	/* try resolution of A */
 	if(!ip6only) {
@@ -728,7 +779,7 @@ print_sock_err(const char* msg)
 
 /** connect to IP address */
 static int
-connect_to_ip(struct ip_list* ip)
+connect_to_ip(struct ip_list* ip, struct ip_list* src)
 {
 	int fd;
 	verb_addr("connect to", ip);
@@ -736,6 +787,11 @@ connect_to_ip(struct ip_list* ip)
 		AF_INET:AF_INET6, SOCK_STREAM, 0);
 	if(fd == -1) {
 		print_sock_err("socket");
+		return -1;
+	}
+	if(src && bind(fd, (struct sockaddr*)&src->addr, src->len) < 0) {
+		print_sock_err("bind");
+		fd_close(fd);
 		return -1;
 	}
 	if(connect(fd, (struct sockaddr*)&ip->addr, ip->len) < 0) {
@@ -760,7 +816,7 @@ setup_sslctx(void)
 
 /** initiate TLS on a connection */
 static SSL*
-TLS_initiate(SSL_CTX* sslctx, int fd)
+TLS_initiate(SSL_CTX* sslctx, int fd, const char* urlname, int use_sni)
 {
 	X509* x;
 	int r;
@@ -770,11 +826,14 @@ TLS_initiate(SSL_CTX* sslctx, int fd)
 		return NULL;
 	}
 	SSL_set_connect_state(ssl);
-	(void)SSL_set_mode(ssl, SSL_MODE_AUTO_RETRY);
+	(void)SSL_set_mode(ssl, (long)SSL_MODE_AUTO_RETRY);
 	if(!SSL_set_fd(ssl, fd)) {
 		if(verb) printf("SSL_set_fd error\n");
 		SSL_free(ssl);
 		return NULL;
+	}
+	if(use_sni) {
+		(void)SSL_set_tlsext_host_name(ssl, urlname);
 	}
 	while(1) {
 		ERR_clear_error();
@@ -788,7 +847,11 @@ TLS_initiate(SSL_CTX* sslctx, int fd)
 		}
 		/* wants to be called again */
 	}
+#ifdef HAVE_SSL_GET1_PEER_CERTIFICATE
+	x = SSL_get1_peer_certificate(ssl);
+#else
 	x = SSL_get_peer_certificate(ssl);
+#endif
 	if(!x) {
 		if(verb) printf("Server presented no peer certificate\n");
 		SSL_free(ssl);
@@ -931,7 +994,7 @@ read_data_chunk(SSL* ssl, size_t len)
 	size_t got = 0;
 	int r;
 	char* data;
-	if(len >= 0xfffffff0)
+	if((unsigned)len >= (unsigned)0xfffffff0)
 		return NULL; /* to protect against integer overflow in malloc*/
 	data = malloc(len+1);
 	if(!data) {
@@ -1096,7 +1159,7 @@ read_http_result(SSL* ssl)
 		data = read_data_chunk(ssl, len);
 	}
 	if(!data) return NULL;
-	if(verb >= 4) print_data("read data", data, (int)len);
+	if(verb >= 4) print_data("read data", data, len);
 	m = BIO_new(BIO_s_mem());
 	if(!m) {
 		if(verb) printf("out of memory\n");
@@ -1110,7 +1173,8 @@ read_http_result(SSL* ssl)
 
 /** https to an IP addr, return BIO with pathname or NULL */
 static BIO*
-https_to_ip(struct ip_list* ip, const char* pathname, const char* urlname)
+https_to_ip(struct ip_list* ip, const char* pathname, const char* urlname,
+	struct ip_list* src, int use_sni)
 {
 	int fd;
 	SSL* ssl;
@@ -1119,12 +1183,12 @@ https_to_ip(struct ip_list* ip, const char* pathname, const char* urlname)
 	if(!sslctx) {
 		return NULL;
 	}
-	fd = connect_to_ip(ip);
+	fd = connect_to_ip(ip, src);
 	if(fd == -1) {
 		SSL_CTX_free(sslctx);
 		return NULL;
 	}
-	ssl = TLS_initiate(sslctx, fd);
+	ssl = TLS_initiate(sslctx, fd, urlname, use_sni);
 	if(!ssl) {
 		SSL_CTX_free(sslctx);
 		fd_close(fd);
@@ -1147,10 +1211,13 @@ https_to_ip(struct ip_list* ip, const char* pathname, const char* urlname)
  * @param ip_list: list of IP addresses to use to fetch from.
  * @param pathname: pathname of file on server to GET.
  * @param urlname: name to pass as the virtual host for this request.
+ * @param src: if nonNULL, source address to bind to.
+ * @param use_sni: if SNI will be used.
  * @return a memory BIO with the file in it.
  */
 static BIO*
-https(struct ip_list* ip_list, const char* pathname, const char* urlname)
+https(struct ip_list* ip_list, const char* pathname, const char* urlname,
+	struct ip_list* src, int use_sni)
 {
 	struct ip_list* ip;
 	BIO* bio = NULL;
@@ -1158,7 +1225,7 @@ https(struct ip_list* ip_list, const char* pathname, const char* urlname)
 	wipe_ip_usage(ip_list);
 	while( (ip = pick_random_ip(ip_list)) ) {
 		ip->used = 1;
-		bio = https_to_ip(ip, pathname, urlname);
+		bio = https_to_ip(ip, pathname, urlname, src, use_sni);
 		if(bio) break;
 	}
 	if(!bio) {
@@ -1568,8 +1635,7 @@ xml_parse_setup(XML_Parser parser, struct xml_data* data, time_t now)
 
 /**
  * Perform XML parsing of the root-anchors file
- * Its format description can be read here
- * https://data.iana.org/root-anchors/draft-icann-dnssec-trust-anchor.txt
+ * Its format description can be found in RFC 7958.
  * It uses libexpat.
  * @param xml: BIO with xml data.
  * @param now: the current time for checking DS validity periods.
@@ -1642,17 +1708,115 @@ static unsigned long
 get_usage_of_ex(X509* cert)
 {
 	unsigned long val = 0;
+#ifdef HAVE_X509_GET_KEY_USAGE
+	val = X509_get_key_usage(cert);
+	if (val == UINT32_MAX)
+		return 0;
+#else
 	ASN1_BIT_STRING* s;
 	if((s=X509_get_ext_d2i(cert, NID_key_usage, NULL, NULL))) {
-		if(s->length > 0) {
-			val = s->data[0];
-			if(s->length > 1)
-				val |= s->data[1] << 8;
+#  ifdef HAVE_ASN1_STRING_GET0_DATA
+		const unsigned char *data = ASN1_STRING_get0_data(s);
+#  else
+		const unsigned char *data = ASN1_STRING_data(s);
+#  endif
+		int len = ASN1_STRING_length(s);
+		if(len > 0) {
+			val = data[0];
+			if(len > 1)
+				val |= data[1] << 8;
 		}
 		ASN1_BIT_STRING_free(s);
 	}
+#endif
 	return val;
 }
+
+#if !defined(HAVE_X509_NAME_GET_TEXT_BY_NID) || defined(DEPRECATED_X509_NAME_GET_TEXT_BY_NID)
+/** print verbose output about name extension data. */
+static void
+print_name_ext(
+#if OPENSSL_VERSION_NUMBER >= 0x40000000
+	const
+#endif
+	X509_NAME* nm, int nid, const char* str)
+{
+	int lastpos = -1;
+	for(;;) {
+#if OPENSSL_VERSION_NUMBER >= 0x40000000
+		const
+#endif
+		X509_NAME_ENTRY* ne;
+#if OPENSSL_VERSION_NUMBER >= 0x40000000
+		const
+#endif
+		ASN1_STRING *asn;
+		const unsigned char *data;
+		char buf[1024];
+
+		lastpos = X509_NAME_get_index_by_NID(nm, nid, lastpos);
+		if(lastpos == -1 || lastpos == -2)
+			break;
+		ne = X509_NAME_get_entry(nm, lastpos);
+		if(!ne) continue;
+		asn = X509_NAME_ENTRY_get_data(ne);
+		if(!asn) continue;
+#  ifdef HAVE_ASN1_STRING_GET0_DATA
+		data = ASN1_STRING_get0_data(asn);
+#  else
+		data = ASN1_STRING_data(asn);
+#  endif
+		if(!data) continue;
+		if(ASN1_STRING_length(asn) > (int)sizeof(buf)-1) continue;
+		memcpy(buf, data, ASN1_STRING_length(asn));
+		buf[ASN1_STRING_length(asn)]=0;
+		printf("%s: %s\n", str, buf);
+	}
+}
+#endif /* X509_NAME_GET_TEXT_BY_NID */
+
+#if !defined(HAVE_X509_NAME_GET_TEXT_BY_NID) || defined(DEPRECATED_X509_NAME_GET_TEXT_BY_NID)
+/** see if the valid emailaddr is present. */
+static int
+has_valid_emailaddr(
+#if OPENSSL_VERSION_NUMBER >= 0x40000000
+	const
+#endif
+	X509_NAME* nm, const char* p7signer)
+{
+	int lastpos = -1;
+	for(;;) {
+#if OPENSSL_VERSION_NUMBER >= 0x40000000
+		const
+#endif
+		X509_NAME_ENTRY* ne;
+#if OPENSSL_VERSION_NUMBER >= 0x40000000
+		const
+#endif
+		ASN1_STRING *asn;
+		const unsigned char *data;
+
+		lastpos = X509_NAME_get_index_by_NID(nm,
+			NID_pkcs9_emailAddress, lastpos);
+		if(lastpos == -1 || lastpos == -2)
+			break;
+		ne = X509_NAME_get_entry(nm, lastpos);
+		if(!ne) continue;
+		asn = X509_NAME_ENTRY_get_data(ne);
+		if(!asn) continue;
+#  ifdef HAVE_ASN1_STRING_GET0_DATA
+		data = ASN1_STRING_get0_data(asn);
+#  else
+		data = ASN1_STRING_data(asn);
+#  endif
+		if(!data) continue;
+		if(ASN1_STRING_length(asn) == (int)strlen(p7signer) &&
+			strncmp((char*)data, p7signer, strlen(p7signer)) == 0)
+			return 1; /* match */
+	}
+	return 0;
+}
+#endif /* X509_NAME_GET_TEXT_BY_NID */
 
 /** get valid signers from the list of signers in the signature */
 static STACK_OF(X509)*
@@ -1673,6 +1837,9 @@ get_valid_signers(PKCS7* p7, const char* p7signer)
 		return NULL;
 	}
 	for(i=0; i<sk_X509_num(signers); i++) {
+#if OPENSSL_VERSION_NUMBER >= 0x40000000
+		const
+#endif
 		X509_NAME* nm = X509_get_subject_name(
 			sk_X509_value(signers, i));
 		char buf[1024];
@@ -1685,17 +1852,29 @@ get_valid_signers(PKCS7* p7, const char* p7signer)
 				(int)sizeof(buf));
 			printf("signer %d: Subject: %s\n", i,
 				nmline?nmline:"no subject");
+#if !defined(HAVE_X509_NAME_GET_TEXT_BY_NID) || defined(DEPRECATED_X509_NAME_GET_TEXT_BY_NID)
+			if(verb >= 3) {
+				print_name_ext(nm, NID_commonName,
+					"commonName");
+				print_name_ext(nm, NID_pkcs9_emailAddress,
+					"emailAddress");
+			}
+#else
 			if(verb >= 3 && X509_NAME_get_text_by_NID(nm,
-				NID_commonName, buf, (int)sizeof(buf)))
+				NID_commonName, buf, (int)sizeof(buf)) > 0)
 				printf("commonName: %s\n", buf);
 			if(verb >= 3 && X509_NAME_get_text_by_NID(nm,
-				NID_pkcs9_emailAddress, buf, (int)sizeof(buf)))
+				NID_pkcs9_emailAddress, buf, (int)sizeof(buf)) > 0)
 				printf("emailAddress: %s\n", buf);
+#endif
 		}
 		if(verb) {
 			int ku_loc = X509_get_ext_by_NID(
 				sk_X509_value(signers, i), NID_key_usage, -1);
 			if(verb >= 3 && ku_loc >= 0) {
+#if OPENSSL_VERSION_NUMBER >= 0x40000000
+				const
+#endif
 				X509_EXTENSION *ex = X509_get_ext(
 					sk_X509_value(signers, i), ku_loc);
 				if(ex) {
@@ -1709,16 +1888,23 @@ get_valid_signers(PKCS7* p7, const char* p7signer)
 			/* there is no name to check, return all records */
 			if(verb) printf("did not check commonName of signer\n");
 		} else {
-			if(!X509_NAME_get_text_by_NID(nm,
+#if !defined(HAVE_X509_NAME_GET_TEXT_BY_NID) || defined(DEPRECATED_X509_NAME_GET_TEXT_BY_NID)
+			if(!has_valid_emailaddr(nm, p7signer)) {
+				if(verb) printf("removed cert with wrong emailaddress\n");
+				continue; /* wrong name, skip it */
+			}
+#else
+			if(X509_NAME_get_text_by_NID(nm,
 				NID_pkcs9_emailAddress,
-				buf, (int)sizeof(buf))) {
-				if(verb) printf("removed cert with no name\n");
+				buf, (int)sizeof(buf)) <= 0) {
+				if(verb) printf("removed cert with no emailaddress\n");
 				continue; /* no name, no use */
 			}
 			if(strcmp(buf, p7signer) != 0) {
-				if(verb) printf("removed cert with wrong name\n");
+				if(verb) printf("removed cert with wrong emailaddress\n");
 				continue; /* wrong name, skip it */
 			}
+#endif
 		}
 
 		/* check that the key usage allows digital signatures
@@ -1815,15 +2001,49 @@ verify_p7sig(BIO* data, BIO* p7s, STACK_OF(X509)* trust, const char* p7signer)
 	return secure;
 }
 
+/** open a temp file */
+static FILE*
+tempfile_open(char* tempf, size_t tempflen, const char* fname, const char* mode)
+{
+	snprintf(tempf, tempflen, "%s~", fname);
+	return fopen(tempf, mode);
+}
+
+/** close an open temp file and replace the original with it */
+static void
+tempfile_close(FILE* fd, const char* tempf, const char* fname)
+{
+	fflush(fd);
+#ifdef HAVE_FSYNC
+	fsync(fileno(fd));
+#else
+	FlushFileBuffers((HANDLE)_get_osfhandle(_fileno(fd)));
+#endif
+	if(fclose(fd) != 0) {
+		printf("could not complete write: %s: %s\n",
+			tempf, strerror(errno));
+		unlink(tempf);
+		return;
+	}
+	/* success; overwrite actual file */
+#ifdef USE_WINSOCK
+	(void)unlink(fname); /* windows does not replace file with rename() */
+#endif
+	if(rename(tempf, fname) < 0) {
+		printf("rename(%s to %s): %s", tempf, fname, strerror(errno));
+	}
+}
+
 /** write unsigned root anchor file, a 5011 revoked tp */
 static void
 write_unsigned_root(const char* root_anchor_file)
 {
 	FILE* out;
 	time_t now = time(NULL);
-	out = fopen(root_anchor_file, "w");
+	char tempf[2048];
+	out = tempfile_open(tempf, sizeof(tempf), root_anchor_file, "w");
 	if(!out) {
-		if(verb) printf("%s: %s\n", root_anchor_file, strerror(errno));
+		if(verb) printf("%s: %s\n", tempf, strerror(errno));
 		return;
 	}
 	if(fprintf(out, "; autotrust trust anchor file\n"
@@ -1838,13 +2058,7 @@ write_unsigned_root(const char* root_anchor_file)
 			root_anchor_file);
 		if(verb && errno != 0) printf("%s\n", strerror(errno));
 	}
-	fflush(out);
-#ifdef HAVE_FSYNC
-	fsync(fileno(out));
-#else
-	FlushFileBuffers((HANDLE)_get_osfhandle(_fileno(out)));
-#endif
-	fclose(out);
+	tempfile_close(out, tempf, root_anchor_file);
 }
 
 /** write root anchor file */
@@ -1854,29 +2068,24 @@ write_root_anchor(const char* root_anchor_file, BIO* ds)
 	char* pp = NULL;
 	int len;
 	FILE* out;
+	char tempf[2048];
 	(void)BIO_seek(ds, 0);
 	len = BIO_get_mem_data(ds, &pp);
 	if(!len || !pp) {
 		if(verb) printf("out of memory\n");
 		return;
 	}
-	out = fopen(root_anchor_file, "w");
+	out = tempfile_open(tempf, sizeof(tempf), root_anchor_file, "w");
 	if(!out) {
-		if(verb) printf("%s: %s\n", root_anchor_file, strerror(errno));
+		if(verb) printf("%s: %s\n", tempf, strerror(errno));
 		return;
 	}
 	if(fwrite(pp, (size_t)len, 1, out) != 1) {
 		if(verb) printf("failed to write all data to %s\n",
-			root_anchor_file);
+			tempf);
 		if(verb && errno != 0) printf("%s\n", strerror(errno));
 	}
-	fflush(out);
-#ifdef HAVE_FSYNC
-	fsync(fileno(out));
-#else
-	FlushFileBuffers((HANDLE)_get_osfhandle(_fileno(out)));
-#endif
-	fclose(out);
+	tempfile_close(out, tempf, root_anchor_file);
 }
 
 /** Perform the verification and update of the trustanchor file */
@@ -1913,18 +2122,26 @@ static int
 do_certupdate(const char* root_anchor_file, const char* root_cert_file,
 	const char* urlname, const char* xmlname, const char* p7sname,
 	const char* p7signer, const char* res_conf, const char* root_hints,
-	const char* debugconf, int ip4only, int ip6only, int port)
+	const char* debugconf, const char* srcaddr, int ip4only, int ip6only,
+	int port, int use_sni)
+
 {
 	STACK_OF(X509)* cert;
 	BIO *xml, *p7s;
 	struct ip_list* ip_list = NULL;
+	struct ip_list* src = NULL;
 
 	/* read pem file or provide builtin */
 	cert = read_cert_or_builtin(root_cert_file);
 
 	/* lookup A, AAAA for the urlname (or parse urlname if IP address) */
 	ip_list = resolve_name(urlname, port, res_conf, root_hints, debugconf,
-		ip4only, ip6only);
+	        srcaddr, ip4only, ip6only);
+
+	if(srcaddr && !(src = parse_ip_addr(srcaddr, 0))) {
+		if(verb) printf("cannot parse source address: %s\n", srcaddr);
+		exit(0);
+	}
 
 #ifdef USE_WINSOCK
 	if(1) { /* libunbound finished, startup WSA for the https connection */
@@ -1940,8 +2157,8 @@ do_certupdate(const char* root_anchor_file, const char* root_cert_file,
 #endif
 
 	/* fetch the necessary files over HTTPS */
-	xml = https(ip_list, xmlname, urlname);
-	p7s = https(ip_list, p7sname, urlname);
+	xml = https(ip_list, xmlname, urlname, src, use_sni);
+	p7s = https(ip_list, p7sname, urlname, src, use_sni);
 
 	/* verify and update the root anchor */
 	verify_and_update_anchor(root_anchor_file, xml, p7s, cert, p7signer);
@@ -2012,18 +2229,19 @@ try_read_anchor(const char* file)
 static void
 write_builtin_anchor(const char* file)
 {
+	char tempf[2048];
 	const char* builtin_root_anchor = get_builtin_ds();
-	FILE* out = fopen(file, "w");
+	FILE* out = tempfile_open(tempf, sizeof(tempf), file, "w");
 	if(!out) {
-		if(verb) printf("%s: %s\n", file, strerror(errno));
-		if(verb) printf("  could not write builtin anchor\n");
+		printf("could not write builtin anchor, to file %s: %s\n",
+			tempf, strerror(errno));
 		return;
 	}
 	if(!fwrite(builtin_root_anchor, strlen(builtin_root_anchor), 1, out)) {
-		if(verb) printf("%s: %s\n", file, strerror(errno));
-		if(verb) printf("  could not complete write builtin anchor\n");
+		printf("could not complete write builtin anchor, to file %s: %s\n",
+			tempf, strerror(errno));
 	}
-	fclose(out);
+	tempfile_close(out, tempf, file);
 }
 
 /** 
@@ -2192,14 +2410,14 @@ probe_date_allows_certupdate(const char* root_anchor_file)
 
 static struct ub_result *
 fetch_root_key(const char* root_anchor_file, const char* res_conf,
-	const char* root_hints, const char* debugconf,
+	const char* root_hints, const char* debugconf, const char* srcaddr,
 	int ip4only, int ip6only)
 {
 	struct ub_ctx* ctx;
 	struct ub_result* dnskey;
 
 	ctx = create_unbound_context(res_conf, root_hints, debugconf,
-		ip4only, ip6only);
+		srcaddr, ip4only, ip6only);
 	add_5011_probe_root(ctx, root_anchor_file);
 	dnskey = prime_root_key(ctx);
 	ub_ctx_delete(ctx);
@@ -2211,8 +2429,8 @@ static int
 do_root_update_work(const char* root_anchor_file, const char* root_cert_file,
 	const char* urlname, const char* xmlname, const char* p7sname,
 	const char* p7signer, const char* res_conf, const char* root_hints,
-	const char* debugconf, int ip4only, int ip6only, int force,
-	int res_conf_fallback, int port)
+	const char* debugconf, const char* srcaddr, int ip4only, int ip6only, 
+	int force, int res_conf_fallback, int port, int use_sni)
 {
 	struct ub_result* dnskey;
 	int used_builtin = 0;
@@ -2226,7 +2444,7 @@ do_root_update_work(const char* root_anchor_file, const char* root_cert_file,
 	/* make unbound context with 5011-probe for root anchor,
 	 * and probe . DNSKEY */
 	dnskey = fetch_root_key(root_anchor_file, res_conf,
-		root_hints, debugconf, ip4only, ip6only);
+		root_hints, debugconf, srcaddr, ip4only, ip6only);
 	rcode = dnskey->rcode;
 
 	if (res_conf_fallback && res_conf && !dnskey->secure) {
@@ -2234,7 +2452,7 @@ do_root_update_work(const char* root_anchor_file, const char* root_cert_file,
 		ub_resolve_free(dnskey);
 		/* try direct query without res_conf */
 		dnskey = fetch_root_key(root_anchor_file, NULL,
-			root_hints, debugconf, ip4only, ip6only);
+			root_hints, debugconf, srcaddr, ip4only, ip6only);
 		if (rcode != 0 && dnskey->rcode == 0) {
 			res_conf = NULL;
 			rcode = 0;
@@ -2255,7 +2473,7 @@ do_root_update_work(const char* root_anchor_file, const char* root_cert_file,
 		probe_date_allows_certupdate(root_anchor_file)) || force) {
 		if(do_certupdate(root_anchor_file, root_cert_file, urlname,
 			xmlname, p7sname, p7signer, res_conf, root_hints,
-			debugconf, ip4only, ip6only, port))
+			debugconf, srcaddr, ip4only, ip6only, port, use_sni))
 			return 1;
 		return used_builtin;
 	}
@@ -2281,10 +2499,12 @@ int main(int argc, char* argv[])
 	const char* res_conf = NULL;
 	const char* root_hints = NULL;
 	const char* debugconf = NULL;
+	const char* srcaddr = NULL;
 	int dolist=0, ip4only=0, ip6only=0, force=0, port = HTTPS_PORT;
 	int res_conf_fallback = 0;
+	int use_sni = 1;
 	/* parse the options */
-	while( (c=getopt(argc, argv, "46C:FRP:a:c:f:hln:r:s:u:vx:")) != -1) {
+	while( (c=getopt(argc, argv, "46C:FRSP:a:b:c:f:hln:r:s:u:vx:")) != -1) {
 		switch(c) {
 		case 'l':
 			dolist = 1;
@@ -2298,11 +2518,17 @@ int main(int argc, char* argv[])
 		case 'a':
 			root_anchor_file = optarg;
 			break;
+		case 'b':
+			srcaddr = optarg;
+			break;
 		case 'c':
 			root_cert_file = optarg;
 			break;
 		case 'u':
 			urlname = optarg;
+			break;
+		case 'S':
+			use_sni = 0;
 			break;
 		case 'x':
 			xmlname = optarg;
@@ -2352,21 +2578,31 @@ int main(int argc, char* argv[])
 	ERR_load_SSL_strings();
 #endif
 #if OPENSSL_VERSION_NUMBER < 0x10100000 || !defined(HAVE_OPENSSL_INIT_CRYPTO)
+#  ifndef S_SPLINT_S
 	OpenSSL_add_all_algorithms();
+#  endif
 #else
 	OPENSSL_init_crypto(OPENSSL_INIT_ADD_ALL_CIPHERS
 		| OPENSSL_INIT_ADD_ALL_DIGESTS
-		| OPENSSL_INIT_LOAD_CRYPTO_STRINGS, NULL);
+		| OPENSSL_INIT_LOAD_CRYPTO_STRINGS
+#  if defined(OPENSSL_INIT_NO_LOAD_CONFIG) && defined(UB_ON_WINDOWS)
+		| OPENSSL_INIT_NO_LOAD_CONFIG
+#  endif
+		, NULL);
 #endif
 #if OPENSSL_VERSION_NUMBER < 0x10100000 || !defined(HAVE_OPENSSL_INIT_SSL)
 	(void)SSL_library_init();
 #else
-	(void)OPENSSL_init_ssl(OPENSSL_INIT_LOAD_SSL_STRINGS, NULL);
+	(void)OPENSSL_init_ssl(OPENSSL_INIT_LOAD_SSL_STRINGS
+#  if defined(OPENSSL_INIT_NO_LOAD_CONFIG) && defined(UB_ON_WINDOWS)
+		| OPENSSL_INIT_NO_LOAD_CONFIG
+#  endif
+		, NULL);
 #endif
 
 	if(dolist) do_list_builtin();
 
 	return do_root_update_work(root_anchor_file, root_cert_file, urlname,
 		xmlname, p7sname, p7signer, res_conf, root_hints, debugconf,
-		ip4only, ip6only, force, res_conf_fallback, port);
+		srcaddr, ip4only, ip6only, force, res_conf_fallback, port, use_sni);
 }

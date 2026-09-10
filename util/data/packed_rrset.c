@@ -40,6 +40,7 @@
  */
 
 #include "config.h"
+#include "util/data/msgparse.h"
 #include "util/data/packed_rrset.h"
 #include "util/data/dname.h"
 #include "util/storage/lookup3.h"
@@ -197,6 +198,7 @@ get_cname_target(struct ub_packed_rrset_key* rrset, uint8_t** dname,
 {
 	struct packed_rrset_data* d;
 	size_t len;
+	if(!rrset) return;
 	if(ntohs(rrset->rk.type) != LDNS_RR_TYPE_CNAME && 
 		ntohs(rrset->rk.type) != LDNS_RR_TYPE_DNAME)
 		return;
@@ -219,6 +221,7 @@ packed_rrset_ttl_add(struct packed_rrset_data* data, time_t add)
 {
 	size_t i;
 	size_t total = data->count + data->rrsig_count;
+	data->ttl_add = add;
 	data->ttl += add;
 	for(i=0; i<total; i++)
 		data->rr_ttl[i] += add;
@@ -273,9 +276,13 @@ int packed_rr_to_string(struct ub_packed_rrset_key* rrset, size_t i,
 	struct packed_rrset_data* d = (struct packed_rrset_data*)rrset->
 		entry.data;
 	uint8_t rr[65535];
+	size_t wlen;
 	size_t rlen = rrset->rk.dname_len + 2 + 2 + 4 + d->rr_len[i];
+	time_t adjust = 0;
 	log_assert(dest_len > 0 && dest);
-	if(rlen > dest_len) {
+	/* rlen is the length written into rr, dest_len bounds the output
+	 * string; check both, callers can pass a dest_len over sizeof(rr). */
+	if(rlen > dest_len || rlen > sizeof(rr)) {
 		dest[0] = 0;
 		return 0;
 	}
@@ -284,11 +291,15 @@ int packed_rr_to_string(struct ub_packed_rrset_key* rrset, size_t i,
 		memmove(rr+rrset->rk.dname_len, &rrset->rk.type, 2);
 	else	sldns_write_uint16(rr+rrset->rk.dname_len, LDNS_RR_TYPE_RRSIG);
 	memmove(rr+rrset->rk.dname_len+2, &rrset->rk.rrset_class, 2);
+	adjust = SERVE_ORIGINAL_TTL ? d->ttl_add : now;
+	if (d->rr_ttl[i] < adjust) adjust = d->rr_ttl[i]; /* Prevent negative TTL overflow */
 	sldns_write_uint32(rr+rrset->rk.dname_len+4,
-		(uint32_t)(d->rr_ttl[i]-now));
+		(uint32_t)(d->rr_ttl[i]-adjust));
 	memmove(rr+rrset->rk.dname_len+8, d->rr_data[i], d->rr_len[i]);
-	if(sldns_wire2str_rr_buf(rr, rlen, dest, dest_len) == -1) {
-		log_info("rrbuf failure %d %s", (int)d->rr_len[i], dest);
+	wlen = (size_t)sldns_wire2str_rr_buf(rr, rlen, dest, dest_len);
+	if(wlen >= dest_len) {
+		/* the output string was truncated */
+		verbose(VERB_ALGO, "rrbuf failure %d %s", (int)d->rr_len[i], dest);
 		dest[0] = 0;
 		return 0;
 	} 
@@ -328,9 +339,9 @@ packed_rrset_copy_region(struct ub_packed_rrset_key* key,
 	struct ub_packed_rrset_key* ck = regional_alloc(region, 
 		sizeof(struct ub_packed_rrset_key));
 	struct packed_rrset_data* d;
-	struct packed_rrset_data* data = (struct packed_rrset_data*)
-		key->entry.data;
+	struct packed_rrset_data* data = key->entry.data;
 	size_t dsize, i;
+	time_t now_control;
 	if(!ck)
 		return NULL;
 	ck->id = key->id;
@@ -343,20 +354,34 @@ packed_rrset_copy_region(struct ub_packed_rrset_key* key,
 	if(!ck->rk.dname)
 		return NULL;
 	dsize = packed_rrset_sizeof(data);
-	d = (struct packed_rrset_data*)regional_alloc_init(region, data, dsize);
+	d = regional_alloc_init(region, data, dsize);
 	if(!d)
 		return NULL;
 	ck->entry.data = d;
 	packed_rrset_ptr_fixup(d);
-	/* make TTLs relative - once per rrset */
-	for(i=0; i<d->count + d->rrsig_count; i++) {
-		if(d->rr_ttl[i] < now)
-			d->rr_ttl[i] = 0;
-		else	d->rr_ttl[i] -= now;
+	/* make TTLs relative - once per rr */
+	if(now > 0) {
+		/* NS RRSets may be here with ttl_add higher than now because
+		 * of the novel ghost attack mitigation i.e., using the
+		 * qstarttime for NS RRSets. In that case make sure that the
+		 * returned TTL is not higher than the original one. */
+		/* For types other than type NS, auth zone and rpz code
+		 * can have ttl_add values. Also time could conceivably move
+		 * in reverse, due to operator action, and it is prudent
+		 * to not assert on that here.
+		 * So there is no assertion d->ttl_add <= now || type==NS */
+		now_control = SERVE_ORIGINAL_TTL ? data->ttl_add
+			: (d->ttl_add > now ? d->ttl_add : now );
+		for(i=0; i<d->count + d->rrsig_count; i++) {
+			if(TTL_IS_EXPIRED(d->rr_ttl[i], now_control)) {
+				d->rr_ttl[i] = EXPIRED_REPLY_TTL_CALC(d->rr_ttl[i], data->ttl_add);
+			} else	d->rr_ttl[i] -= now_control;
+		}
+		if(TTL_IS_EXPIRED(d->ttl, now_control)) {
+			d->ttl = EXPIRED_REPLY_TTL_CALC(d->ttl, data->ttl_add);
+		} else	d->ttl -= now_control;
+		d->ttl_add = 0; /* TTLs have been made relative */
 	}
-	if(d->ttl < now)
-		d->ttl = 0;
-	else	d->ttl -= now;
 	return ck;
 }
 
@@ -385,4 +410,20 @@ packed_rrset_copy_alloc(struct ub_packed_rrset_key* key,
 	dk->entry.data = (void*)dd;
 	packed_rrset_ttl_add(dd, now);
 	return dk;
+}
+
+int
+packed_rrset_find_rr(struct packed_rrset_data* d, uint8_t* rdata, size_t len,
+	size_t* index)
+{
+	size_t i;
+	for(i=0; i<d->count; i++) {
+		if(d->rr_len[i] != len)
+			continue;
+		if(memcmp(d->rr_data[i], rdata, len) == 0) {
+			*index = i;
+			return 1;
+		}
+	}
+	return 0;
 }

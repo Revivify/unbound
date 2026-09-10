@@ -86,7 +86,6 @@ void autr_global_delete(struct autr_global_data* global)
 	if(!global)
 		return;
 	/* elements deleted by parent */
-	memset(global, 0, sizeof(*global));
 	free(global);
 }
 
@@ -161,10 +160,12 @@ verbose_key(struct autr_ta* ta, enum verbosity_value level,
  * Parse comments 
  * @param str: to parse
  * @param ta: trust key autotrust metadata
+ * @param header_seen: if an autotrust file header was seen.
+ *	Without such a header it is a list of resource records.
  * @return false on failure.
  */
 static int
-parse_comments(char* str, struct autr_ta* ta)
+parse_comments(char* str, struct autr_ta* ta, int header_seen)
 {
         int len = (int)strlen(str), pos = 0, timestamp = 0;
         char* comment = (char*) malloc(sizeof(char)*len+1);
@@ -197,10 +198,18 @@ parse_comments(char* str, struct autr_ta* ta)
                 free(comment);
                 return 0;
         }
-        if (pos <= 0)
-                ta->s = AUTR_STATE_VALID;
-        else
-        {
+        if (pos <= 0) {
+		if(header_seen) {
+			/* There was an autotrust trust anchor file header,
+			 * with a ;; id=.. line, so the entries
+			 * have to have ;;state= annotations. */
+			log_err("trust anchor in state file has no ;;state= "
+				"annotation, ignoring");
+			free(comment);
+			return 0;
+		}
+		ta->s = AUTR_STATE_VALID;
+        } else {
                 int s = (int) comments[pos] - '0';
                 switch(s)
                 {
@@ -354,26 +363,30 @@ autr_tp_create(struct val_anchors* anchors, uint8_t* own, size_t own_len,
 
 	lock_basic_lock(&anchors->lock);
 	if(!rbtree_insert(anchors->tree, &tp->node)) {
+		char buf[LDNS_MAX_DOMAINLEN];
 		lock_basic_unlock(&anchors->lock);
-		log_err("trust anchor presented twice");
+		dname_str(tp->name, buf);
+		log_err("trust anchor for '%s' presented twice", buf);
 		free(tp->name);
 		free(tp->autr);
 		free(tp);
 		return NULL;
 	}
 	if(!rbtree_insert(&anchors->autr->probe, &tp->autr->pnode)) {
+		char buf[LDNS_MAX_DOMAINLEN];
 		(void)rbtree_delete(anchors->tree, tp);
 		lock_basic_unlock(&anchors->lock);
-		log_err("trust anchor in probetree twice");
+		dname_str(tp->name, buf);
+		log_err("trust anchor for '%s' in probetree twice", buf);
 		free(tp->name);
 		free(tp->autr);
 		free(tp);
 		return NULL;
 	}
-	lock_basic_unlock(&anchors->lock);
 	lock_basic_init(&tp->lock);
 	lock_protect(&tp->lock, tp, sizeof(*tp));
 	lock_protect(&tp->lock, tp->autr, sizeof(*tp->autr));
+	lock_basic_unlock(&anchors->lock);
 	return tp;
 }
 
@@ -386,6 +399,15 @@ autr_rrset_delete(struct ub_packed_rrset_key* r)
 		free(r->entry.data);
 		free(r);
 	}
+}
+
+/** delete autotrust key data */
+static void
+autr_ta_delete(struct autr_ta* ta)
+{
+	if(!ta) return;
+	free(ta->rr);
+	free(ta);
 }
 
 void autr_point_delete(struct trust_anchor* tp)
@@ -401,8 +423,7 @@ void autr_point_delete(struct trust_anchor* tp)
 		struct autr_ta* p = tp->autr->keys, *np;
 		while(p) {
 			np = p->next;
-			free(p->rr);
-			free(p);
+			autr_ta_delete(p);
 			p = np;
 		}
 		free(tp->autr->file);
@@ -446,8 +467,7 @@ add_trustanchor_frm_rr(struct val_anchors* anchors, uint8_t* rr, size_t rr_len,
 		return NULL;
 	*tp = find_add_tp(anchors, rr, rr_len, dname_len);
 	if(!*tp) {
-		free(ta->rr);
-		free(ta);
+		autr_ta_delete(ta);
 		return NULL;
 	}
 	/* add ta to tp */
@@ -520,12 +540,14 @@ add_trustanchor_frm_str(struct val_anchors* anchors, char* str,
  * @param prev: passed to ldns.
  * @param prev_len: length of prev
  * @param skip: if true, the result is NULL, but not an error, skip it.
+ * @param header_seen: if an autotrust file header was seen.
+ *	Without such a header it is a list of resource records.
  * @return false on failure, otherwise the tp read.
  */
 static struct trust_anchor*
 load_trustanchor(struct val_anchors* anchors, char* str, const char* fname,
 	uint8_t* origin, size_t origin_len, uint8_t** prev, size_t* prev_len,
-	int* skip)
+	int* skip, int header_seen)
 {
 	struct autr_ta* ta = NULL;
 	struct trust_anchor* tp = NULL;
@@ -535,7 +557,11 @@ load_trustanchor(struct val_anchors* anchors, char* str, const char* fname,
 	if(!ta)
 		return NULL;
 	lock_basic_lock(&tp->lock);
-	if(!parse_comments(str, ta)) {
+	if(!parse_comments(str, ta, header_seen)) {
+		/* ta was already linked into the list of keys, unlink it */
+		log_assert(tp->autr->keys == ta);
+		tp->autr->keys = ta->next;
+		autr_ta_delete(ta);
 		lock_basic_unlock(&tp->lock);
 		return NULL;
 	}
@@ -843,19 +869,32 @@ parse_id(struct val_anchors* anchors, char* line)
  * @param anchors: the anchor is added to this, if "id:" is seen.
  * @param anchor: the anchor as result value or previously returned anchor
  * 	value to read the variable lines into.
+ * @param header_seen: if a header ';;id: example.com.' was seen.
+ * @param nm: file name.
  * @return: 0 no match, -1 failed syntax error, +1 success line read.
  * 	+2 revoked trust anchor file.
  */
 static int
 parse_var_line(char* line, struct val_anchors* anchors, 
-	struct trust_anchor** anchor)
+	struct trust_anchor** anchor, int* header_seen, const char* nm)
 {
 	struct trust_anchor* tp = *anchor;
 	int r = 0;
 	if(strncmp(line, ";;id: ", 6) == 0) {
+		*header_seen = 1;
 		*anchor = parse_id(anchors, line+6);
 		if(!*anchor) return -1;
-		else return 1;
+		lock_basic_lock(&(*anchor)->lock);
+		if(*anchor && !(*anchor)->autr->file) {
+			(*anchor)->autr->file = strdup(nm);
+			if(!(*anchor)->autr->file) {
+				lock_basic_unlock(&(*anchor)->lock);
+				log_err("malloc failure");
+				return -1;
+			}
+		}
+		lock_basic_unlock(&(*anchor)->lock);
+		if(*anchor) return 1;
 	} else if(strncmp(line, ";;REVOKED", 9) == 0) {
 		if(tp) {
 			log_err("REVOKED statement must be at start of file");
@@ -989,14 +1028,15 @@ int autr_read_file(struct val_anchors* anchors, const char* nm)
         FILE* fd;
         /* keep track of line numbers */
         int line_nr = 0;
-        /* single line */
-        char line[10240];
+        /* single line, enough space for large DNSKEY, 64K, in hex and dname */
+        char line[10240+65536*2];
 	/* trust point being read */
 	struct trust_anchor *tp = NULL, *tp2;
 	int r;
 	/* for $ORIGIN parsing */
 	uint8_t *origin=NULL, *prev=NULL;
 	size_t origin_len=0, prev_len=0;
+	int header_seen = 0;
 
         if (!(fd = fopen(nm, "r"))) {
                 log_err("unable to open %s for reading: %s", 
@@ -1005,7 +1045,7 @@ int autr_read_file(struct val_anchors* anchors, const char* nm)
         }
         verbose(VERB_ALGO, "reading autotrust anchor file %s", nm);
         while ( (r=read_multiline(line, sizeof(line), fd, &line_nr)) != 0) {
-		if(r == -1 || (r = parse_var_line(line, anchors, &tp)) == -1) {
+		if(r == -1 || (r = parse_var_line(line, anchors, &tp, &header_seen, nm)) == -1) {
 			log_err("could not parse auto-trust-anchor-file "
 				"%s line %d", nm, line_nr);
 			fclose(fd);
@@ -1027,7 +1067,7 @@ int autr_read_file(struct val_anchors* anchors, const char* nm)
 			continue;
 		r = 0;
                 if(!(tp2=load_trustanchor(anchors, line, nm, origin,
-			origin_len, &prev, &prev_len, &r))) {
+			origin_len, &prev, &prev_len, &r, header_seen))) {
 			if(!r) log_err("failed to load trust anchor from %s "
 				"at line %i, skipping", nm, line_nr);
                         /* try to do the rest */
@@ -1078,6 +1118,17 @@ trustanchor_state2str(autr_state_type s)
         return " UNKNOWN ";
 }
 
+/** ctime r for autotrust */
+static char* autr_ctime_r(time_t* t, char* s)
+{
+	ctime_r(t, s);
+#ifdef USE_WINSOCK
+	if(strlen(s) > 10 && s[7]==' ' && s[8]=='0')
+		s[8]=' '; /* fix error in windows ctime */
+#endif
+	return s;
+}
+
 /** print ID to file */
 static int
 print_id(FILE* out, char* fname, uint8_t* nm, size_t nmlen, uint16_t dclass)
@@ -1124,13 +1175,13 @@ autr_write_contents(FILE* out, char* fn, struct trust_anchor* tp)
 	}
 	if(fprintf(out, ";;last_queried: %u ;;%s", 
 		(unsigned int)tp->autr->last_queried, 
-		ctime_r(&(tp->autr->last_queried), tmi)) < 0 ||
+		autr_ctime_r(&(tp->autr->last_queried), tmi)) < 0 ||
 	   fprintf(out, ";;last_success: %u ;;%s", 
 		(unsigned int)tp->autr->last_success,
-		ctime_r(&(tp->autr->last_success), tmi)) < 0 ||
+		autr_ctime_r(&(tp->autr->last_success), tmi)) < 0 ||
 	   fprintf(out, ";;next_probe_time: %u ;;%s", 
 		(unsigned int)tp->autr->next_probe_time,
-		ctime_r(&(tp->autr->next_probe_time), tmi)) < 0 ||
+		autr_ctime_r(&(tp->autr->next_probe_time), tmi)) < 0 ||
 	   fprintf(out, ";;query_failed: %d\n", (int)tp->autr->query_failed)<0
 	   || fprintf(out, ";;query_interval: %d\n", 
 	   (int)tp->autr->query_interval) < 0 ||
@@ -1161,7 +1212,7 @@ autr_write_contents(FILE* out, char* fn, struct trust_anchor* tp)
 			";;lastchange=%u ;;%s", str, (int)ta->s, 
 			trustanchor_state2str(ta->s), (int)ta->pending_count,
 			(unsigned int)ta->last_change, 
-			ctime_r(&(ta->last_change), tmi)) < 0) {
+			autr_ctime_r(&(ta->last_change), tmi)) < 0) {
 		   log_err("could not write to %s: %s", fn, strerror(errno));
 		   free(str);
 		   return 0;
@@ -1175,15 +1226,32 @@ void autr_write_file(struct module_env* env, struct trust_anchor* tp)
 {
 	FILE* out;
 	char* fname = tp->autr->file;
+#ifndef S_SPLINT_S
+	long long llvalue;
+#endif
 	char tempf[2048];
 	log_assert(tp->autr);
+	if(!fname) {
+		log_err("autotrust: trust point has no backing file, "
+			"skipping write");
+		return;
+	}
 	if(!env) {
 		log_err("autr_write_file: Module environment is NULL.");
 		return;
 	}
-	/* unique name with pid number and thread number */
-	snprintf(tempf, sizeof(tempf), "%s.%d-%d", fname, (int)getpid(),
-		env->worker?*(int*)env->worker:0);
+	/* unique name with pid number, thread number, and struct pointer
+	 * (the pointer uniquifies for multiple libunbound contexts) */
+#ifndef S_SPLINT_S
+#if defined(SIZE_MAX) && defined(UINT32_MAX) && (UINT32_MAX == SIZE_MAX || INT32_MAX == SIZE_MAX)
+	/* avoid warning about upcast on 32bit systems */
+	llvalue = (unsigned long)tp;
+#else
+	llvalue = (unsigned long long)tp;
+#endif
+	snprintf(tempf, sizeof(tempf), "%s.%d-%d-" ARG_LL "x", fname, (int)getpid(),
+		env->worker?*(int*)env->worker:0, llvalue);
+#endif /* S_SPLINT_S */
 	verbose(VERB_ALGO, "autotrust: write to disk: %s", tempf);
 	out = fopen(tempf, "w");
 	if(!out) {
@@ -1236,12 +1304,13 @@ verify_dnskey(struct module_env* env, struct val_env* ve,
         struct trust_anchor* tp, struct ub_packed_rrset_key* rrset,
 	struct module_qstate* qstate)
 {
+	char reasonbuf[256];
 	char* reason = NULL;
 	uint8_t sigalg[ALGO_NEEDS_MAX+1];
 	int downprot = env->cfg->harden_algo_downgrade;
 	enum sec_status sec = val_verify_DNSKEY_with_TA(env, ve, rrset,
 		tp->ds_rrset, tp->dnskey_rrset, downprot?sigalg:NULL, &reason,
-		qstate);
+		NULL, qstate, reasonbuf, sizeof(reasonbuf));
 	/* sigalg is ignored, it returns algorithms signalled to exist, but
 	 * in 5011 there are no other rrsets to check.  if downprot is
 	 * enabled, then it checks that the DNSKEY is signed with all
@@ -1290,7 +1359,7 @@ rr_is_selfsigned_revoked(struct module_env* env, struct val_env* ve,
 	/* no algorithm downgrade protection necessary, if it is selfsigned
 	 * revoked it can be removed. */
 	sec = dnskey_verify_rrset(env, ve, dnskey_rrset, dnskey_rrset, i, 
-		&reason, LDNS_SECTION_ANSWER, qstate);
+		&reason, NULL, LDNS_SECTION_ANSWER, qstate);
 	return (sec == sec_status_secure);
 }
 
@@ -1563,6 +1632,7 @@ key_matches_a_ds(struct module_env* env, struct val_env* ve,
 	for(ds_idx=0; ds_idx<num; ds_idx++) {
 		if(!ds_digest_algo_is_supported(ds_rrset, ds_idx) ||
 			!ds_key_algo_is_supported(ds_rrset, ds_idx) ||
+			!dnskey_size_is_supported(dnskey_rrset, key_idx) ||
 			ds_get_digest_algo(ds_rrset, ds_idx) != d)
 			continue;
 		if(ds_get_key_algo(ds_rrset, ds_idx)
@@ -1617,7 +1687,8 @@ update_events(struct module_env* env, struct val_env* ve,
 		}
 		/* is a key of this type supported?. Note rr_list and
 		 * packed_rrset are in the same order. */
-		if(!dnskey_algo_is_supported(dnskey_rrset, i)) {
+		if(!dnskey_algo_is_supported(dnskey_rrset, i) ||
+			!dnskey_size_is_supported(dnskey_rrset, i)) {
 			/* skip unknown algorithm key, it is useless to us */
 			log_nametypeclass(VERB_DETAIL, "trust point has "
 				"unsupported algorithm at", 
@@ -1963,8 +2034,7 @@ autr_cleanup_keys(struct trust_anchor* tp)
 			!= LDNS_RR_TYPE_DNSKEY) {
 			struct autr_ta* np = p->next;
 			/* remove */
-			free(p->rr);
-			free(p);
+			autr_ta_delete(p);
 			/* snip and go to next item */
 			*prevp = np;
 			p = np;
@@ -2006,23 +2076,38 @@ wait_probe_time(struct val_anchors* anchors)
 	return 0;
 }
 
-/** reset worker timer */
+/** reset worker timer, at the time from wait_probe_time. */
 static void
-reset_worker_timer(struct module_env* env)
+reset_worker_timer_at(struct module_env* env, time_t next)
 {
 	struct timeval tv;
 #ifndef S_SPLINT_S
-	time_t next = (time_t)wait_probe_time(env->anchors);
 	/* in case this is libunbound, no timer */
 	if(!env->probe_timer)
 		return;
 	if(next > *env->now)
 		tv.tv_sec = (time_t)(next - *env->now);
 	else	tv.tv_sec = 0;
+#else
+	(void)next;
 #endif
 	tv.tv_usec = 0;
 	comm_timer_set(env->probe_timer, &tv);
 	verbose(VERB_ALGO, "scheduled next probe in " ARG_LL "d sec", (long long)tv.tv_sec);
+}
+
+/** reset worker timer. This routine manages the locks on acquiring the
+ * next time for the timer. */
+static void
+reset_worker_timer(struct module_env* env)
+{
+	time_t next;
+	if(!env->anchors)
+		return;
+	lock_basic_lock(&env->anchors->lock);
+	next = wait_probe_time(env->anchors);
+	lock_basic_unlock(&env->anchors->lock);
+	reset_worker_timer_at(env, next);
 }
 
 /** set next probe for trust anchor */
@@ -2063,7 +2148,7 @@ set_next_probe(struct module_env* env, struct trust_anchor* tp,
 	verbose(VERB_ALGO, "next probe set in %d seconds", 
 		(int)tp->autr->next_probe_time - (int)*env->now);
 	if(mold != mnew) {
-		reset_worker_timer(env);
+		reset_worker_timer_at(env, mnew);
 	}
 	return 1;
 }
@@ -2118,7 +2203,7 @@ autr_tp_remove(struct module_env* env, struct trust_anchor* tp,
 		autr_point_delete(del_tp);
 	}
 	if(mold != mnew) {
-		reset_worker_timer(env);
+		reset_worker_timer_at(env, mnew);
 	}
 }
 
@@ -2245,8 +2330,8 @@ autr_debug_print_ta(struct autr_ta* ta)
 		log_info("out of memory in debug_print_ta");
 		return;
 	}
-	if(str && str[0]) str[strlen(str)-1]=0; /* remove newline */
-	ctime_r(&ta->last_change, buf);
+	if(str[0]) str[strlen(str)-1]=0; /* remove newline */
+	(void)autr_ctime_r(&ta->last_change, buf);
 	if(buf[0]) buf[strlen(buf)-1]=0; /* remove newline */
 	log_info("[%s] %s ;;state:%d ;;pending_count:%d%s%s last:%s",
 		trustanchor_state2str(ta->s), str, ta->s, ta->pending_count,
@@ -2259,7 +2344,9 @@ static void
 autr_debug_print_tp(struct trust_anchor* tp)
 {
 	struct autr_ta* ta;
-	char buf[257];
+	/* Note: buf is also used for autr_ctime_r but that only needs a size
+	 *       of 26, so LDNS_MAX_DOMAINLEN is enough. */
+	char buf[LDNS_MAX_DOMAINLEN];
 	if(!tp->autr)
 		return;
 	dname_str(tp->name, buf);
@@ -2267,19 +2354,19 @@ autr_debug_print_tp(struct trust_anchor* tp)
 	log_info("assembled %d DS and %d DNSKEYs", 
 		(int)tp->numDS, (int)tp->numDNSKEY);
 	if(tp->ds_rrset) {
-		log_packed_rrset(0, "DS:", tp->ds_rrset);
+		log_packed_rrset(NO_VERBOSE, "DS:", tp->ds_rrset);
 	}
 	if(tp->dnskey_rrset) {
-		log_packed_rrset(0, "DNSKEY:", tp->dnskey_rrset);
+		log_packed_rrset(NO_VERBOSE, "DNSKEY:", tp->dnskey_rrset);
 	}
-	log_info("file %s", tp->autr->file);
-	ctime_r(&tp->autr->last_queried, buf);
+	log_info("file %s", (tp->autr->file?tp->autr->file:"null"));
+	(void)autr_ctime_r(&tp->autr->last_queried, buf);
 	if(buf[0]) buf[strlen(buf)-1]=0; /* remove newline */
 	log_info("last_queried: %u %s", (unsigned)tp->autr->last_queried, buf);
-	ctime_r(&tp->autr->last_success, buf);
+	(void)autr_ctime_r(&tp->autr->last_success, buf);
 	if(buf[0]) buf[strlen(buf)-1]=0; /* remove newline */
 	log_info("last_success: %u %s", (unsigned)tp->autr->last_success, buf);
-	ctime_r(&tp->autr->next_probe_time, buf);
+	(void)autr_ctime_r(&tp->autr->next_probe_time, buf);
 	if(buf[0]) buf[strlen(buf)-1]=0; /* remove newline */
 	log_info("next_probe_time: %u %s", (unsigned)tp->autr->next_probe_time,
 		buf);
@@ -2348,7 +2435,12 @@ probe_anchor(struct module_env* env, struct trust_anchor* tp)
 	edns.ext_rcode = 0;
 	edns.edns_version = 0;
 	edns.bits = EDNS_DO;
-	edns.opt_list = NULL;
+	edns.opt_list_in = NULL;
+	edns.opt_list_out = NULL;
+	edns.opt_list_inplace_cb_out = NULL;
+	edns.padding_block_size = 0;
+	edns.cookie_present = 0;
+	edns.cookie_valid = 0;
 	if(sldns_buffer_capacity(buf) < 65535)
 		edns.udp_size = (uint16_t)sldns_buffer_capacity(buf);
 	else	edns.udp_size = 65535;
@@ -2365,7 +2457,7 @@ probe_anchor(struct module_env* env, struct trust_anchor* tp)
 		qinfo.qclass);
 
 	if(!mesh_new_callback(env->mesh, &qinfo, qflags, &edns, buf, 0, 
-		&probe_answer_cb, env)) {
+		&probe_answer_cb, env, 0, NULL)) {
 		log_err("out of memory making 5011 probe");
 	}
 }

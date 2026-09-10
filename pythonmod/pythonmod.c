@@ -65,6 +65,15 @@ typedef void* PyGILState_STATE;
 #endif
 
 /**
+ *  counter for python module instances
+ *  incremented by pythonmod_init(...)
+ */
+int py_mod_count = 0;
+
+/** Python main thread */
+PyThreadState* mainthr;
+
+/**
  * Global state for the module.
  */
 struct pythonmod_env {
@@ -72,8 +81,6 @@ struct pythonmod_env {
 	/** Python script filename. */
 	const char* fname;
 
-	/** Python main thread */
-	PyThreadState* mainthr;
 	/** Python module. */
 	PyObject* module;
 
@@ -103,6 +110,34 @@ struct pythonmod_qstate {
 
 	/** Module per query data. */
 	PyObject* data;
+};
+
+/* The dict from __main__ could have remnants from a previous script
+ * invocation, in a multi python module setup. Usually this is fine since newer
+ * scripts will update their values. The obvious erroneous case is when mixing
+ * python scripts that make use of both 'init' and 'init_standard'. This
+ * results in 'init_standard' to persist on following scripts that don't use it
+ * (thus not replacing it). This is also problematic in case where a script
+ * does not define a required function but a previously loaded script did. The
+ * current solution is to make sure to clean offensive remnants that influence
+ * further parsing of the individual scripts.
+ */
+static void
+clean_python_function_objects(PyObject* dict) {
+	const char* function_names[] = {
+		"init",
+		"init_standard",
+		"deinit",
+		"operate",
+		"inform_super"
+	};
+	size_t i;
+
+	for(i=0; i<sizeof(function_names)/sizeof(function_names[0]); i++) {
+		if(PyDict_GetItemString(dict, function_names[i]) != NULL) {
+			PyDict_DelItemString(dict, function_names[i]);
+		}
+	}
 };
 
 /* Generated */
@@ -211,14 +246,14 @@ log_py_err(void)
 	}
 
 	/* And it should be a string all ready to go - duplicate it. */
-	if (!PyString_Check(obResult) && !PyUnicode_Check(obResult)) {
+	if (!PyBytes_Check(obResult) && !PyUnicode_Check(obResult)) {
 		log_err("pythonmod: cannot print exception, "
 			"StringIO.getvalue() result did not String_Check"
 			" or Unicode_Check");
 		goto cleanup;
 	}
-	if(PyString_Check(obResult)) {
-		result = PyString_AsString(obResult);
+	if(PyBytes_Check(obResult)) {
+		result = PyBytes_AsString(obResult);
 	} else {
 		ascstr = PyUnicode_AsASCIIString(obResult);
 		result = PyBytes_AsString(ascstr);
@@ -238,18 +273,37 @@ cleanup:
 	/* clear the exception, by not restoring it */
 	/* Restore the exception state */
 	/* PyErr_Restore(exc_typ, exc_val, exc_tb); */
+	/* when using PyErr_Restore there is no need to Py_XDECREF for
+	 * these 3 pointers. */
+	Py_XDECREF(exc_typ);
+	Py_XDECREF(exc_val);
+	Py_XDECREF(exc_tb);
+}
+
+/* we only want to unwind Python once at exit */
+static void
+pythonmod_atexit(void)
+{
+   log_assert(py_mod_count == 0);
+   log_assert(mainthr != NULL);
+ 
+   PyEval_RestoreThread(mainthr);
+   Py_Finalize();
 }
 
 int pythonmod_init(struct module_env* env, int id)
 {
+   int py_mod_idx = py_mod_count++;
+
    /* Initialize module */
    FILE* script_py = NULL;
-   PyObject* py_init_arg, *res;
+   PyObject* py_init_arg = NULL, *res = NULL, *fname = NULL;
    PyGILState_STATE gil;
-   int init_standard = 1;
+   int init_standard = 1, i = 0;
 #if PY_MAJOR_VERSION < 3
    PyObject* PyFileObject = NULL;
 #endif
+   struct config_strlist* cfg_item = env->cfg->python_script;
 
    struct pythonmod_env* pe = (struct pythonmod_env*)calloc(1, sizeof(struct pythonmod_env));
    if (!pe)
@@ -261,52 +315,115 @@ int pythonmod_init(struct module_env* env, int id)
    env->modinfo[id] = (void*) pe;
 
    /* Initialize module */
-   pe->fname = env->cfg->python_script;
+   pe->fname=NULL; i = 0;
+   while (cfg_item!=NULL) {
+      if (py_mod_idx==i++) {
+         pe->fname=cfg_item->str;
+         break;
+      }
+      cfg_item = cfg_item->next;
+   }
    if(pe->fname==NULL || pe->fname[0]==0) {
-      log_err("pythonmod: no script given.");
+      log_err("pythonmod[%d]: no script given.", py_mod_idx);
       return 0;
    }
 
    /* Initialize Python libraries */
-   if (!Py_IsInitialized())
+   if (py_mod_count==1 && !Py_IsInitialized()) 
    {
+#if PY_VERSION_HEX >= 0x03080000
+      PyStatus status;
+      PyPreConfig preconfig;
+      PyConfig config;
+#endif
 #if PY_MAJOR_VERSION >= 3
       wchar_t progname[8];
       mbstowcs(progname, "unbound", 8);
 #else
       char *progname = "unbound";
 #endif
+#if PY_VERSION_HEX < 0x03080000
       Py_SetProgramName(progname);
-      Py_NoSiteFlag = 1;
+#else
+      /* Python must be preinitialized, before the PyImport_AppendInittab
+       * call. */
+      PyPreConfig_InitPythonConfig(&preconfig);
+      status = Py_PreInitialize(&preconfig);
+      if(PyStatus_Exception(status)) {
+	log_err("python exception in Py_PreInitialize: %s%s%s",
+		(status.func?status.func:""), (status.func?": ":""),
+		(status.err_msg?status.err_msg:""));
+	return 0;
+      }
+#endif
 #if PY_MAJOR_VERSION >= 3
       PyImport_AppendInittab(SWIG_name, (void*)SWIG_init);
 #endif
+#if PY_VERSION_HEX < 0x03080000
+      Py_NoSiteFlag = 1;
       Py_Initialize();
+#else
+      PyConfig_InitPythonConfig(&config);
+      status = PyConfig_SetString(&config, &config.program_name, progname);
+      if(PyStatus_Exception(status)) {
+	log_err("python exception in PyConfig_SetString(.. program_name ..): %s%s%s",
+		(status.func?status.func:""), (status.func?": ":""),
+		(status.err_msg?status.err_msg:""));
+	PyConfig_Clear(&config);
+	return 0;
+      }
+      config.site_import = 0;
+      status = Py_InitializeFromConfig(&config);
+      if(PyStatus_Exception(status)) {
+	log_err("python exception in Py_InitializeFromConfig: %s%s%s",
+		(status.func?status.func:""), (status.func?": ":""),
+		(status.err_msg?status.err_msg:""));
+	PyConfig_Clear(&config);
+	return 0;
+      }
+      PyConfig_Clear(&config);
+#endif
+#if PY_MAJOR_VERSION <= 2 || (PY_MAJOR_VERSION == 3 && PY_MINOR_VERSION <= 6)
+      /* initthreads only for python 3.6 and older */
       PyEval_InitThreads();
+#endif
       SWIG_init();
-      pe->mainthr = PyEval_SaveThread();
+      mainthr = PyEval_SaveThread();
+
+      /* register callback to unwind Python at exit */
+      atexit(pythonmod_atexit);
    }
 
    gil = PyGILState_Ensure();
 
-   /* Initialize Python */
-   PyRun_SimpleString("import sys \n");
-   PyRun_SimpleString("sys.path.append('.') \n");
-   if(env->cfg->directory && env->cfg->directory[0]) {
-      char wdir[1524];
-      snprintf(wdir, sizeof(wdir), "sys.path.append('%s') \n",
-      env->cfg->directory);
-      PyRun_SimpleString(wdir);
-   }
-   PyRun_SimpleString("sys.path.append('"RUN_DIR"') \n");
-   PyRun_SimpleString("sys.path.append('"SHARE_DIR"') \n");
-   PyRun_SimpleString("import distutils.sysconfig \n");
-   PyRun_SimpleString("sys.path.append(distutils.sysconfig.get_python_lib(1,0)) \n");
-   if (PyRun_SimpleString("from unboundmodule import *\n") < 0)
-   {
-      log_err("pythonmod: cannot initialize core module: unboundmodule.py");
-      PyGILState_Release(gil);
-      return 0;
+   if (py_mod_count==1) {
+      /* Initialize Python */
+      if(PyRun_SimpleString("import sys \n") < 0 ) {
+         log_err("pythonmod: cannot initialize core module: unboundmodule.py");
+         goto python_init_fail;
+      }
+      PyRun_SimpleString("sys.path.append('.') \n");
+      PyRun_SimpleString("sys.path.append('"RUN_DIR"') \n");
+      PyRun_SimpleString("sys.path.append('"SHARE_DIR"') \n");
+      if(env->cfg->directory && env->cfg->directory[0]) {
+         char wdir[1524];
+         snprintf(wdir, sizeof(wdir), "sys.path.append('%s') \n",
+         env->cfg->directory);
+         PyRun_SimpleString(wdir);
+      }
+      if(PyRun_SimpleString("import site\n") < 0) {
+         log_err("pythonmod: cannot initialize core module: unboundmodule.py");
+         goto python_init_fail;
+      }
+      if(PyRun_SimpleString("sys.path.extend(site.getsitepackages())\n") < 0) {
+         log_err("pythonmod: cannot initialize core module: unboundmodule.py");
+         goto python_init_fail;
+      }
+      if(PyRun_SimpleString("from unboundmodule import *\n") < 0)
+      {
+         log_err("pythonmod: cannot initialize core module: unboundmodule.py");
+         goto python_init_fail;
+      }
    }
 
    /* Check Python file load */
@@ -316,25 +433,41 @@ int pythonmod_init(struct module_env* env, int id)
    PyFileObject = PyFile_FromString((char*)pe->fname, "r");
    script_py = PyFile_AsFile(PyFileObject);
 #else
-   script_py = _Py_fopen(pe->fname, "r");
+   script_py = fopen(pe->fname, "r");
 #endif
    if (script_py == NULL)
    {
       log_err("pythonmod: can't open file %s for reading", pe->fname);
-      PyGILState_Release(gil);
-      return 0;
+      goto python_init_fail;
    }
 
    /* Load file */
    pe->module = PyImport_AddModule("__main__");
+   Py_XINCREF(pe->module);
    pe->dict = PyModule_GetDict(pe->module);
-   pe->data = Py_None;
-   Py_INCREF(pe->data);
-   PyModule_AddObject(pe->module, "mod_env", pe->data);
+   Py_XINCREF(pe->dict);
+   clean_python_function_objects(pe->dict);
 
-   /* TODO: deallocation of pe->... if an error occurs */
+   pe->data = PyDict_New();
+   /* add the script filename to the global "mod_env" for trivial access */
+   fname = PyUnicode_FromString(pe->fname);
+   if(PyDict_SetItemString(pe->data, "script", fname) < 0) {
+	log_err("pythonmod: could not add item to dictionary");
+	Py_XDECREF(fname);
+	goto fail_close_file;
+   }
+   Py_XDECREF(fname);
+   Py_XINCREF(pe->data);  /* reference will be stolen below */
+   if(PyModule_AddObject(pe->module, "mod_env", pe->data) < 0) {
+	log_err("pythonmod: could not add mod_env object");
+	Py_XDECREF(pe->data);  /* 2 times, here and on python_init_fail; */
+	                       /* on failure the reference is not stolen */
+	goto fail_close_file;
+   }
 
    if (PyRun_SimpleFile(script_py, pe->fname) < 0) {
+#if PY_MAJOR_VERSION <= 2 || (PY_MAJOR_VERSION == 3 && PY_MINOR_VERSION < 9)
+      /* for python before 3.9 */
       log_err("pythonmod: can't parse Python script %s", pe->fname);
       /* print the error to logs too, run it again */
       fseek(script_py, 0, SEEK_SET);
@@ -350,10 +483,57 @@ int pythonmod_init(struct module_env* env, int id)
       /* ignore the NULL return of _node, it is NULL due to the parse failure
        * that we are expecting */
       (void)PyParser_SimpleParseFile(script_py, pe->fname, Py_file_input);
+#else
+      /* for python 3.9 and newer */
+      char* fstr = NULL;
+      size_t flen = 0;
+      long pos = 0;
+      log_err("pythonmod: can't parse Python script %s", pe->fname);
+      /* print the error to logs too, run it again */
+      fseek(script_py, 0, SEEK_END);
+      pos = ftell(script_py);
+      if (pos == -1L) {
+         log_err("ftell failed to print parse error: %s: %s",
+            pe->fname, strerror(errno));
+         goto fail_close_file;
+      }
+      flen = (size_t)pos;
+#ifdef SIZE_MAX
+      if(flen > SIZE_MAX-2) {
+		log_err("script file too large");
+		goto fail_close_file;
+      }
+#endif
+      fstr = malloc(flen+1);
+      if(!fstr) {
+		log_err("malloc failure to print parse error");
+		goto fail_close_file;
+      }
+      fseek(script_py, 0, SEEK_SET);
+      if(fread(fstr, flen, 1, script_py) < 1) {
+		log_err("file read failed to print parse error: %s: %s",
+		pe->fname, strerror(errno));
+		free(fstr);
+		goto fail_close_file;
+      }
+      fstr[flen] = 0;
+      /* we compile the string, but do not run it, to stop side-effects */
+      /* ignore the NULL return of _node, it is NULL due to the parse failure
+       * that we are expecting */
+      (void)Py_CompileString(fstr, pe->fname, Py_file_input);
+#endif
+
       log_py_err();
-      PyGILState_Release(gil);
-      return 0;
+#if PY_MAJOR_VERSION <= 2 || (PY_MAJOR_VERSION == 3 && PY_MINOR_VERSION < 9)
+      /* no cleanup needed for python before 3.9 */
+#else
+      /* cleanup for python 3.9 and newer */
+      free(fstr);
+#endif
+      goto fail_close_file;
    }
+
+/* close the file */
 #if PY_MAJOR_VERSION < 3
    Py_XDECREF(PyFileObject);
 #else
@@ -366,28 +546,28 @@ int pythonmod_init(struct module_env* env, int id)
       if ((pe->func_init = PyDict_GetItemString(pe->dict, "init")) == NULL)
       {
          log_err("pythonmod: function init is missing in %s", pe->fname);
-         PyGILState_Release(gil);
-         return 0;
+         goto python_init_fail;
       }
    }
+   Py_XINCREF(pe->func_init);
    if ((pe->func_deinit = PyDict_GetItemString(pe->dict, "deinit")) == NULL)
    {
       log_err("pythonmod: function deinit is missing in %s", pe->fname);
-      PyGILState_Release(gil);
-      return 0;
+      goto python_init_fail;
    }
+   Py_XINCREF(pe->func_deinit);
    if ((pe->func_operate = PyDict_GetItemString(pe->dict, "operate")) == NULL)
    {
       log_err("pythonmod: function operate is missing in %s", pe->fname);
-      PyGILState_Release(gil);
-      return 0;
+      goto python_init_fail;
    }
+   Py_XINCREF(pe->func_operate);
    if ((pe->func_inform = PyDict_GetItemString(pe->dict, "inform_super")) == NULL)
    {
       log_err("pythonmod: function inform_super is missing in %s", pe->fname);
-      PyGILState_Release(gil);
-      return 0;
+      goto python_init_fail;
    }
+   Py_XINCREF(pe->func_inform);
 
    if (init_standard)
    {
@@ -403,21 +583,38 @@ int pythonmod_init(struct module_env* env, int id)
    {
       log_err("pythonmod: Exception occurred in function init");
       log_py_err();
-      Py_XDECREF(res);
-      Py_XDECREF(py_init_arg);
-      PyGILState_Release(gil);
-      return 0;
+      goto python_init_fail;
    }
 
    Py_XDECREF(res);
    Py_XDECREF(py_init_arg);
    PyGILState_Release(gil);
-
    return 1;
+
+fail_close_file:
+#if PY_MAJOR_VERSION < 3
+   Py_XDECREF(PyFileObject);
+#else
+   fclose(script_py);
+#endif
+
+python_init_fail:
+   Py_XDECREF(pe->module);
+   Py_XDECREF(pe->dict);
+   Py_XDECREF(pe->data);
+   Py_XDECREF(pe->func_init);
+   Py_XDECREF(pe->func_deinit);
+   Py_XDECREF(pe->func_operate);
+   Py_XDECREF(pe->func_inform);
+   Py_XDECREF(res);
+   Py_XDECREF(py_init_arg);
+   PyGILState_Release(gil);
+   return 0;
 }
 
 void pythonmod_deinit(struct module_env* env, int id)
 {
+   int cbtype;
    struct pythonmod_env* pe = env->modinfo[id];
    if(pe == NULL)
       return;
@@ -437,15 +634,23 @@ void pythonmod_deinit(struct module_env* env, int id)
       /* Free result if any */
       Py_XDECREF(res);
       /* Free shared data if any */
+      Py_XDECREF(pe->module);
+      Py_XDECREF(pe->dict);
       Py_XDECREF(pe->data);
+      Py_XDECREF(pe->func_init);
+      Py_XDECREF(pe->func_deinit);
+      Py_XDECREF(pe->func_inform);
+      Py_XDECREF(pe->func_operate);
       PyGILState_Release(gil);
 
-      PyEval_RestoreThread(pe->mainthr);
-      Py_Finalize();
-      pe->mainthr = NULL;
+      py_mod_count--;
    }
    pe->fname = NULL;
    free(pe);
+
+   /* iterate over all possible callback types and clean up each in turn */
+   for (cbtype = 0; cbtype < inplace_cb_types_total; cbtype++)
+      inplace_cb_delete(env, cbtype, id);
 
    /* Module is deallocated in Python */
    env->modinfo[id] = NULL;
@@ -498,10 +703,19 @@ void pythonmod_operate(struct module_qstate* qstate, enum module_ev event,
    {
       /* create qstate */
       pq = qstate->minfo[id] = malloc(sizeof(struct pythonmod_qstate));
+      if(!pq) {
+		log_err("pythonmod_operate: malloc failure for qstate");
+		PyGILState_Release(gil);
+		return;
+      }
 
       /* Initialize per query data */
-      pq->data = Py_None;
-      Py_INCREF(pq->data);
+      pq->data = PyDict_New();
+      if(!pq->data) {
+		log_err("pythonmod_operate: malloc failure for query data dict");
+		PyGILState_Release(gil);
+		return;
+      }
    }
 
    /* Call operate */
@@ -559,8 +773,8 @@ size_t pythonmod_get_mem(struct module_env* env, int id)
  */
 static struct module_func_block pythonmod_block = {
    "python",
-   &pythonmod_init, &pythonmod_deinit, &pythonmod_operate, &pythonmod_inform_super,
-   &pythonmod_clear, &pythonmod_get_mem
+   NULL, NULL, &pythonmod_init, &pythonmod_deinit, &pythonmod_operate,
+   &pythonmod_inform_super, &pythonmod_clear, &pythonmod_get_mem
 };
 
 struct module_func_block* pythonmod_get_funcblock(void)

@@ -114,7 +114,7 @@ void dnsc_delete(struct dnsc_env *env);
 
 /**
  * handle a crypted dnscrypt request.
- * Determine wether or not a query is coming over the dnscrypt listener and
+ * Determine whether or not a query is coming over the dnscrypt listener and
  * attempt to uncurve it or detect if it is a certificate query.
  * return 0 in case of failure.
  */
@@ -122,13 +122,14 @@ int dnsc_handle_curved_request(struct dnsc_env* dnscenv,
                                struct comm_reply* repinfo);
 /**
  * handle an unencrypted dnscrypt request.
- * Determine wether or not a query is going over the dnscrypt channel and
+ * Determine whether or not a query is going over the dnscrypt channel and
  * attempt to curve it unless it was not crypted like when  it is a
  * certificate query.
  * \return 0 in case of failure.
  */
 
-int dnsc_handle_uncurved_request(struct comm_reply *repinfo);
+int dnsc_handle_uncurved_request(struct comm_reply *repinfo,
+	struct sldns_buffer* buffer);
 
 /**
  * Computes the size of the shared secret cache entry.

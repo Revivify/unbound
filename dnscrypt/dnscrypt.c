@@ -316,15 +316,15 @@ dnscrypt_server_uncurve(struct dnsc_env* env,
 #else
             return -1;
 #endif
-    } else {
-        if (crypto_box_beforenm(nmkey,
-                                query_header->publickey,
-                                cert->keypair->crypt_secretkey) != 0) {
-            return -1;
-        }
-    }
-    // Cache the shared secret we just computed.
-    dnsc_shared_secret_cache_insert(env->shared_secrets_cache,
+	} else {
+	    if (crypto_box_beforenm(nmkey,
+				    query_header->publickey,
+				    cert->keypair->crypt_secretkey) != 0) {
+		return -1;
+	    }
+	}
+        // Cache the shared secret we just computed.
+        dnsc_shared_secret_cache_insert(env->shared_secrets_cache,
                                     key,
                                     hash,
                                     nmkey);
@@ -361,7 +361,7 @@ dnscrypt_server_uncurve(struct dnsc_env* env,
 
     len -= DNSCRYPT_QUERY_HEADER_SIZE;
 
-    while (*sldns_buffer_at(buffer, --len) == 0)
+    while (len>0 && *sldns_buffer_at(buffer, --len) == 0)
         ;
 
     if (*sldns_buffer_at(buffer, len) != 0x80) {
@@ -435,27 +435,14 @@ dnscrypt_hrtime(void)
 
 /**
  * Add the server nonce part to once.
- * The nonce is made half of client nonce and the seconf half of the server
+ * The nonce is made half of client nonce and the second half of the server
  * nonce, both of them of size crypto_box_HALF_NONCEBYTES.
  * \param[in] nonce: a uint8_t* of size crypto_box_NONCEBYTES
  */
 static void
 add_server_nonce(uint8_t *nonce)
 {
-    uint64_t ts;
-    uint64_t tsn;
-    uint32_t suffix;
-    ts = dnscrypt_hrtime();
-    // TODO? dnscrypt-wrapper does some logic with context->nonce_ts_last
-    // unclear if we really need it, so skipping it for now.
-    tsn = (ts << 10) | (randombytes_random() & 0x3ff);
-#if (BYTE_ORDER == LITTLE_ENDIAN)
-    tsn =
-        (((uint64_t)htonl((uint32_t)tsn)) << 32) | htonl((uint32_t)(tsn >> 32));
-#endif
-    memcpy(nonce + crypto_box_HALF_NONCEBYTES, &tsn, 8);
-    suffix = randombytes_random();
-    memcpy(nonce + crypto_box_HALF_NONCEBYTES + 8, &suffix, 4);
+    randombytes_buf(nonce + crypto_box_HALF_NONCEBYTES, 8/*tsn*/+4/*suffix*/);
 }
 
 /**
@@ -487,10 +474,18 @@ dnscrypt_server_curve(const dnsccert *cert,
     uint8_t *const buf = sldns_buffer_begin(buffer);
     size_t len = sldns_buffer_limit(buffer);
 
+    if(len + DNSCRYPT_REPLY_HEADER_SIZE > sldns_buffer_capacity(buffer))
+	return -1;
+    sldns_buffer_clear(buffer);
+
     if(udp){
         if (max_len > max_reply_size)
             max_len = max_reply_size;
     }
+    if(max_len > sldns_buffer_capacity(buffer))
+	max_len = sldns_buffer_capacity(buffer);
+    if(max_len > 65535)
+	    max_len = 65535;
 
 
     memcpy(nonce, client_nonce, crypto_box_HALF_NONCEBYTES);
@@ -533,6 +528,7 @@ dnscrypt_server_curve(const dnsccert *cert,
                           DNSCRYPT_MAGIC_HEADER_LEN,
                           nonce,
                           crypto_box_NONCEBYTES);
+    sldns_buffer_flip(buffer);
     sldns_buffer_set_limit(buffer, len + DNSCRYPT_REPLY_HEADER_SIZE);
     return 0;
 }
@@ -676,6 +672,8 @@ dnsc_find_cert(struct dnsc_env* dnscenv, struct sldns_buffer* buffer)
 	}
 	dnscrypt_header = (struct dnscrypt_query_header *)sldns_buffer_begin(buffer);
 	for (i = 0U; i < dnscenv->signed_certs_count; i++) {
+		if(!certs[i].keypair)
+			continue;
 		if (memcmp(certs[i].magic_query, dnscrypt_header->magic_query,
                    DNSCRYPT_MAGIC_HEADER_LEN) == 0) {
 			return &certs[i];
@@ -687,7 +685,7 @@ dnsc_find_cert(struct dnsc_env* dnscenv, struct sldns_buffer* buffer)
 /**
  * Insert local-zone and local-data into configuration.
  * In order to be able to serve certs over TXT, we can reuse the local-zone and
- * local-data config option. The zone and qname are infered from the
+ * local-data config option. The zone and qname are inferred from the
  * provider_name and the content of the TXT record from the certificate content.
  * returns the number of certificate TXT record that were loaded.
  * < 0 in case of error.
@@ -732,6 +730,11 @@ dnsc_load_local_data(struct dnsc_env* dnscenv, struct config_file *cfg)
             );
             continue;
         }
+	if((unsigned)strlen(dnscenv->provider_name) >= (unsigned)0xffff0000) {
+		/* guard against integer overflow in rrlen calculation */
+		verbose(VERB_OPS, "cert #%" PRIu32 " is too long", serial);
+		continue;
+	}
         rrlen = strlen(dnscenv->provider_name) +
                          strlen(ttl_class_type) +
                          4 * sizeof(struct SignedCert) + // worst case scenario
@@ -746,9 +749,9 @@ dnsc_load_local_data(struct dnsc_env* dnscenv, struct config_file *cfg)
         for(j=0; j<sizeof(struct SignedCert); j++) {
 			int c = (int)*((const uint8_t *) cert + j);
             if (isprint(c) && c != '"' && c != '\\') {
-                snprintf(rr + strlen(rr), rrlen - 1 - strlen(rr), "%c", c);
+                snprintf(rr + strlen(rr), rrlen - strlen(rr), "%c", c);
             } else {
-                snprintf(rr + strlen(rr), rrlen - 1 - strlen(rr), "\\%03d", c);
+                snprintf(rr + strlen(rr), rrlen - strlen(rr), "\\%03d", c);
             }
         }
         verbose(VERB_OPS,
@@ -757,7 +760,7 @@ dnsc_load_local_data(struct dnsc_env* dnscenv, struct config_file *cfg)
 			" to local-data to config: %s",
 			serial, rr
 		);
-        snprintf(rr + strlen(rr), rrlen - 1 - strlen(rr), "\"");
+        snprintf(rr + strlen(rr), rrlen - strlen(rr), "\"");
         cfg_strlist_insert(&cfg->local_data, strdup(rr));
         free(rr);
     }
@@ -812,6 +815,7 @@ dnsc_parse_keys(struct dnsc_env *env, struct config_file *cfg)
 		sizeof *env->keypairs);
 	env->certs = sodium_allocarray(env->signed_certs_count,
 		sizeof *env->certs);
+	memset(env->certs, 0, env->signed_certs_count * sizeof(*env->certs));
 
 	cert_id = 0U;
 	keypair_id = 0U;
@@ -838,7 +842,14 @@ dnsc_parse_keys(struct dnsc_env *env, struct config_file *cfg)
 			if(memcmp(current_keypair->crypt_publickey,
 				env->signed_certs[c].server_publickey,
 				crypto_box_PUBLICKEYBYTES) == 0) {
-				dnsccert *current_cert = &env->certs[cert_id++];
+				dnsccert* current_cert;
+				if(cert_id >= env->signed_certs_count) {
+					log_err("dnscrypt: secret key %s matches a cert that "
+						"is already bound to another key (duplicate "
+						"dnscrypt-secret-key?)", head->str);
+					return -1;
+				}
+				current_cert = &env->certs[cert_id++];
 				found_cert = 1;
 				current_cert->keypair = current_keypair;
 				memcpy(current_cert->magic_query,
@@ -871,15 +882,17 @@ dnsc_parse_keys(struct dnsc_env *env, struct config_file *cfg)
 	return cert_id;
 }
 
+#ifdef SODIUM_MISUSE_HANDLER
 static void
 sodium_misuse_handler(void)
 {
 	fatal_exit(
 		"dnscrypt: libsodium could not be initialized, this typically"
 		" happens when no good source of entropy is found. If you run"
-		" unbound in a chroot, make sure /dev/random is available. See"
+		" unbound in a chroot, make sure /dev/urandom is available. See"
 		" https://www.unbound.net/documentation/unbound.conf.html");
 }
+#endif
 
 
 /**
@@ -918,12 +931,13 @@ dnsc_handle_curved_request(struct dnsc_env* dnscenv,
 }
 
 int
-dnsc_handle_uncurved_request(struct comm_reply *repinfo)
+dnsc_handle_uncurved_request(struct comm_reply *repinfo,
+	struct sldns_buffer* buffer)
 {
     if(!repinfo->c->dnscrypt) {
         return 1;
     }
-    sldns_buffer_copy(repinfo->c->dnscrypt_buffer, repinfo->c->buffer);
+    sldns_buffer_copy(repinfo->c->dnscrypt_buffer, buffer);
     if(!repinfo->is_dnscrypted) {
         return 1;
     }
@@ -969,11 +983,18 @@ dnsc_create(void)
 int
 dnsc_apply_cfg(struct dnsc_env *env, struct config_file *cfg)
 {
+    int nkeys;
     if(dnsc_parse_certs(env, cfg) <= 0) {
         fatal_exit("dnsc_apply_cfg: no cert file loaded");
     }
-    if(dnsc_parse_keys(env, cfg) <= 0) {
+    nkeys = dnsc_parse_keys(env, cfg);
+    if(nkeys <= 0) {
         fatal_exit("dnsc_apply_cfg: no key file loaded");
+    }
+    if((size_t)nkeys < env->signed_certs_count) {
+	fatal_exit("dnsc_apply_cfg: %u dnscrypt-provider-cert file(s) have no "
+		"matching dnscrypt-secret-key",
+		(unsigned)(env->signed_certs_count - (size_t)nkeys));
     }
     randombytes_buf(env->hash_key, sizeof env->hash_key);
     env->provider_name = cfg->dnscrypt_provider;

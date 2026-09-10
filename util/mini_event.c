@@ -297,10 +297,10 @@ int event_add(struct event* ev, struct timeval* tv)
 		return -1;
 	if( (ev->ev_events&(EV_READ|EV_WRITE)) && ev->ev_fd != -1) {
 		ev->ev_base->fds[ev->ev_fd] = ev;
-		if(ev->ev_events&EV_READ) {
+		if((ev->ev_events&EV_READ)) {
 			FD_SET(FD_SET_T ev->ev_fd, &ev->ev_base->reads);
 		}
-		if(ev->ev_events&EV_WRITE) {
+		if((ev->ev_events&EV_WRITE)) {
 			FD_SET(FD_SET_T ev->ev_fd, &ev->ev_base->writes);
 		}
 		FD_SET(FD_SET_T ev->ev_fd, &ev->ev_base->content);
@@ -313,7 +313,7 @@ int event_add(struct event* ev, struct timeval* tv)
 		struct timeval *now = ev->ev_base->time_tv;
 		ev->ev_timeout.tv_sec = tv->tv_sec + now->tv_sec;
 		ev->ev_timeout.tv_usec = tv->tv_usec + now->tv_usec;
-		while(ev->ev_timeout.tv_usec > 1000000) {
+		while(ev->ev_timeout.tv_usec >= 1000000) {
 			ev->ev_timeout.tv_usec -= 1000000;
 			ev->ev_timeout.tv_sec++;
 		}
@@ -337,6 +337,15 @@ int event_del(struct event* ev)
 		FD_CLR(FD_SET_T ev->ev_fd, &ev->ev_base->writes);
 		FD_CLR(FD_SET_T ev->ev_fd, &ev->ev_base->ready);
 		FD_CLR(FD_SET_T ev->ev_fd, &ev->ev_base->content);
+		if(ev->ev_fd == ev->ev_base->maxfd) {
+                        int i = ev->ev_base->maxfd - 1;
+                        for (; i > 3; i--) {
+                                if (NULL != ev->ev_base->fds[i]) {
+                                        break;
+                                }
+                        }
+                        ev->ev_base->maxfd = i;
+                }
 	}
 	ev->added = 0;
 	return 0;

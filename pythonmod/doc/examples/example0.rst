@@ -50,8 +50,27 @@ Script file must contain four compulsory functions:
 ::
 
    def init(id, cfg):
-      log_info("pythonmod: init called, module id is %d port: %d script: %s" % (id, cfg.port, cfg.python_script))
+      log_info("pythonmod: init called, module id is %d port: %d script: %s" % (id, cfg.port, mod_env['script']))
       return True
+
+
+.. function:: init_standard(id, env)
+
+   Initialize module internals, like database etc.
+   Called just once on module load.
+
+   *Preferred* over the init() function above as this function's signature is the
+   same as the C counterpart and allows for extra functionality during init.
+   The previously accessible configuration options can now be found in env.cfg.
+
+   :param id: module identifier (integer)
+   :param env: :class:`module_env` module environment
+
+::
+
+    def init_standard(id, env):
+       log_info("pythonmod: init called, module id is %d port: %d script: %s" % (id, env.cfg.port, mod_env['script']))
+       return True
 
 
 .. function:: deinit(id)

@@ -120,7 +120,7 @@ void rrset_cache_touch(struct rrset_cache* r, struct ub_packed_rrset_key* key,
  *	the new rrset. The reference may be changed if the cached rrset is
  *	superior.
  *	Before calling the rrset is presumed newly allocated and changeable.
- *	Afer calling you do not hold a lock, and the rrset is inserted in
+ *	After calling you do not hold a lock, and the rrset is inserted in
  *	the hashtable so you need a lock to change it.
  * @param alloc: how to allocate (and deallocate) the special rrset key.
  * @param timenow: current time (to see if ttl in cache is expired).
@@ -143,7 +143,7 @@ int rrset_cache_update(struct rrset_cache* r, struct rrset_ref* ref,
  * @param rrset: which rrset to cache as wildcard. This rrset is left 
  * 	untouched.
  * @param ce: the closest encloser, will be uses to generate the wildcard dname.
- * @param ce_len: the closest encloser lenght.
+ * @param ce_len: the closest encloser length.
  * @param alloc: how to allocate (and deallocate) the special rrset key.
  * @param timenow: current time (to see if ttl in cache is expired).
  */
@@ -230,6 +230,37 @@ void rrset_update_sec_status(struct rrset_cache* r,
  */
 void rrset_check_sec_status(struct rrset_cache* r, 
 	struct ub_packed_rrset_key* rrset, time_t now);
+
+/**
+ * Removes rrsets above the qname, returns upper qname.
+ * @param r: the rrset cache.
+ * @param qname: the start qname, also used as the output.
+ * @param qnamelen: length of qname, updated when it returns.
+ * @param searchtype: qtype to search for.
+ * @param qclass: qclass to search for.
+ * @param now: current time.
+ * @param qnametop: the top qname to stop removal (it is not removed).
+ * @param qnametoplen: length of qnametop.
+ */
+void rrset_cache_remove_above(struct rrset_cache* r, uint8_t** qname,
+	size_t* qnamelen, uint16_t searchtype, uint16_t qclass, time_t now,
+	uint8_t* qnametop, size_t qnametoplen);
+
+/**
+ * Sees if an rrset is expired above the qname, returns upper qname.
+ * @param r: the rrset cache.
+ * @param qname: the start qname, also used as the output.
+ * @param qnamelen: length of qname, updated when it returns.
+ * @param searchtype: qtype to search for.
+ * @param qclass: qclass to search for.
+ * @param now: current time.
+ * @param qnametop: the top qname, don't look farther than that.
+ * @param qnametoplen: length of qnametop.
+ * @return true if there is an expired rrset above, false otherwise.
+ */
+int rrset_cache_expired_above(struct rrset_cache* r, uint8_t** qname,
+	size_t* qnamelen, uint16_t searchtype, uint16_t qclass, time_t now,
+	uint8_t* qnametop, size_t qnametoplen);
 
 /**
  * Remove an rrset from the cache, by name and type and flags

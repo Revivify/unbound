@@ -48,6 +48,7 @@ struct query_info;
 struct regional;
 struct module_env;
 struct iter_env;
+struct module_qstate;
 
 /**
  * Cleanup the passed dns message.
@@ -59,11 +60,18 @@ struct iter_env;
  *	Used to determine out of bailiwick information.
  * @param regional: where to allocate (new) parts of the message.
  * @param env: module environment with config settings and cache. 
+ * @param qstate: for setting errinf for EDE error messages.
  * @param ie: iterator module environment data.
+ * @param msg_lame_empty: returned true if the empty packet is lame.
+ * @param msg_lame_referral: returned true if the reply has a referral before
+ *	scrub.
+ * @param rdset: if RD bit was sent in query sent by unbound.
  * @return: false if the message is total waste. true if scrubbed with success.
  */
 int scrub_message(struct sldns_buffer* pkt, struct msg_parse* msg, 
 	struct query_info* qinfo, uint8_t* zonename, struct regional* regional,
-	struct module_env* env, struct iter_env* ie);
+	struct module_env* env, struct module_qstate* qstate,
+	struct iter_env* ie, int* msg_lame_empty, int* msg_lame_referral,
+	int rdset);
 
 #endif /* ITERATOR_ITER_SCRUB_H */

@@ -80,5 +80,13 @@ void ecs_test(void);
 void ldns_test(void);
 /** unit test for auth zone functions */
 void authzone_test(void);
+/** unit test for zonemd functions */
+void zonemd_test(void);
+/** unit test for tcp_reuse functions */
+void tcpreuse_test(void);
+/** unit test for doq functions */
+void doq_test(void);
+/** unit test for infra cache functions */
+void infra_test(void);
 
 #endif /* TESTCODE_UNITMAIN_H */

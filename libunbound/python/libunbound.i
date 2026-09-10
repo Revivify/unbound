@@ -36,6 +36,9 @@
 %begin %{
 /* store state of warning output, restored at later pop */
 #pragma GCC diagnostic push
+/* ignore warnings for pragma below, where for older GCC it can produce a
+   warning if the cast-function-type warning is absent. */
+#pragma GCC diagnostic ignored "-Wpragmas"
 /* ignore gcc8 METH_NOARGS function cast warnings for swig function pointers */
 #pragma GCC diagnostic ignored "-Wcast-function-type"
 %}
@@ -242,6 +245,7 @@
     RR_TYPE_MAILA = 254,
     /**  any type (wildcard) */
     RR_TYPE_ANY = 255,
+    RR_TYPE_CAA = 257,
 
     /* RFC 4431, 5074, DNSSEC Lookaside Validation */
     RR_TYPE_DLV = 32769,
@@ -362,7 +366,7 @@ Result: ['74.125.43.147', '74.125.43.99', '74.125.43.103', '74.125.43.104']
                     ctx.debuglevel(3)
                     ctx.debugout(fw)
 
-                  Another option is to print the debug informations to stderr output
+                  Another option is to print the debug information to stderr output
 
                   ::
 
@@ -823,8 +827,7 @@ Result: ['74.125.43.147', '74.125.43.99', '74.125.43.103', '74.125.43.104']
        """
        return self.rcode2str[self.rcode]
 
-   __swig_getmethods__["rcode_str"] = _get_rcode_str
-   if _newclass:rcode_str = _swig_property(_get_rcode_str)
+   rcode_str = property(_get_rcode_str)
 
    def _get_raw_data(self):
        """Result data, a list of network order DNS rdata items. 
@@ -833,15 +836,13 @@ Result: ['74.125.43.147', '74.125.43.99', '74.125.43.103', '74.125.43.104']
        """
        return self._ub_result_data(self)
 
-   __swig_getmethods__["rawdata"] = _get_raw_data
    rawdata = property(_get_raw_data, doc="Returns raw data, a list of rdata items. To decode RAW data use the :attr:`data` attribute which returns an instance of :class:`ub_data` containing the conversion functions.")
 
    def _get_data(self):
        if not self.havedata: return None
        return ub_data(self._ub_result_data(self))
   
-   __swig_getmethods__["data"] = _get_data
-   __swig_getmethods__["packet"] = _packet
+   packet = property(_packet)
    data = property(_get_data, doc="Returns :class:`ub_data` instance containing various decoding functions or None")
 
 %}
@@ -852,7 +853,7 @@ Result: ['74.125.43.147', '74.125.43.99', '74.125.43.103', '74.125.43.104']
 %{ 
   //printf("resolve_start(%lX)\n",(long unsigned int)arg1);
   Py_BEGIN_ALLOW_THREADS 
-  $function 
+  $action
   Py_END_ALLOW_THREADS 
   //printf("resolve_stop()\n");
 %} 
@@ -862,6 +863,9 @@ Result: ['74.125.43.147', '74.125.43.99', '74.125.43.103', '74.125.43.104']
 %inline %{
   //SWIG will see the ub_ctx as a class
   struct ub_ctx {
+          /* Dummy member, so the struct is not empty, MSVC complains about
+           * that. */
+          int dummy;
   };
 %}
 
@@ -918,7 +922,13 @@ int _ub_resolve_async(struct ub_ctx* ctx, char* name, int rrtype, int rrclass, v
       struct cb_data* id;
       id = (struct cb_data*) iddata;
       arglist = Py_BuildValue("(OiO)",id->data,status, SWIG_NewPointerObj(SWIG_as_voidptr(result), SWIGTYPE_p_ub_result, 0 |  0 ));   // Build argument list
+#if PY_MAJOR_VERSION <= 2 || (PY_MAJOR_VERSION == 3 && PY_MINOR_VERSION < 9)
+      /* for python before 3.9 */
       fresult = PyEval_CallObject(id->func,arglist);     // Call Python
+#else
+      /* for python 3.9 and newer */
+      fresult = PyObject_Call(id->func,arglist,NULL);
+#endif
       Py_DECREF(id->func);
       Py_DECREF(id->data);
       free(id);
@@ -932,6 +942,8 @@ int _ub_resolve_async(struct ub_ctx* ctx, char* name, int rrtype, int rrclass, v
       int r;
       struct cb_data* id;
       id = (struct cb_data*) malloc(sizeof(struct cb_data));
+      if(!id)
+              return -2; /* UB_NOMEM */
       id->data = mydata;
       id->func = pyfunc;
    

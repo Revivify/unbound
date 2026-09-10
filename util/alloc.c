@@ -328,7 +328,7 @@ size_t alloc_get_mem(struct alloc_cache* alloc)
 struct regional* 
 alloc_reg_obtain(struct alloc_cache* alloc)
 {
-	if(alloc->num_reg_blocks > 0) {
+	if(alloc->num_reg_blocks > 0 && alloc->reg_list) {
 		struct regional* r = alloc->reg_list;
 		alloc->reg_list = (struct regional*)r->next;
 		r->next = NULL;
@@ -376,6 +376,7 @@ void *unbound_stat_malloc(size_t size)
 {
 	void* res;
 	if(size == 0) size = 1;
+	log_assert(size <= SIZE_MAX-16);
 	res = malloc(size+16);
 	if(!res) return NULL;
 	unbound_mem_alloc += size;
@@ -398,6 +399,7 @@ void *unbound_stat_calloc(size_t nmemb, size_t size)
 	if(nmemb != 0 && INT_MAX/nmemb < size)
 		return NULL; /* integer overflow check */
 	s = (nmemb*size==0)?(size_t)1:nmemb*size;
+	log_assert(s <= SIZE_MAX-16);
 	res = calloc(1, s+16);
 	if(!res) return NULL;
 	log_info("stat %p=calloc(%u, %u)", res+16, (unsigned)nmemb, (unsigned)size);
@@ -447,6 +449,7 @@ void *unbound_stat_realloc(void *ptr, size_t size)
 		/* nothing changes */
 		return ptr;
 	}
+	log_assert(size <= SIZE_MAX-16);
 	res = malloc(size+16);
 	if(!res) return NULL;
 	unbound_mem_alloc += size;
@@ -462,6 +465,18 @@ void *unbound_stat_realloc(void *ptr, size_t size)
 	memcpy(res, &size, sizeof(size));
 	memcpy(res+8, &mem_special, sizeof(mem_special));
 	return res+16;
+}
+/** strdup with stats */
+char *unbound_stat_strdup(const char* s)
+{
+	size_t len;
+	char* res;
+	if(!s) return NULL;
+	len = strlen(s);
+	res = unbound_stat_malloc(len+1);
+	if(!res) return NULL;
+	memmove(res, s, len+1);
+	return res;
 }
 
 /** log to file where alloc was done */
@@ -504,6 +519,24 @@ void *unbound_stat_realloc_log(void *ptr, size_t size, const char* file,
 	return unbound_stat_realloc(ptr, size);
 }
 
+/** log to file where alloc was done */
+void *unbound_stat_reallocarray_log(void *ptr, size_t nmemb, size_t size,
+	const char* file, int line, const char* func)
+{
+	log_info("%s:%d %s reallocarray(%p, %u, %u)", file, line, func,
+		ptr, (unsigned)nmemb, (unsigned)size);
+	return unbound_stat_realloc(ptr, nmemb*size);
+}
+
+/** log to file where strdup was done */
+char *unbound_stat_strdup_log(const char *s, const char* file, int line,
+	const char* func)
+{
+	log_info("%s:%d %s strdup size %u", file, line, func,
+		(s?(unsigned)strlen(s)+1:0));
+	return unbound_stat_strdup(s);
+}
+
 #endif /* UNBOUND_ALLOC_STATS */
 #ifdef UNBOUND_ALLOC_LITE
 #undef malloc
@@ -521,7 +554,9 @@ void *unbound_stat_malloc_lite(size_t size, const char* file, int line,
         const char* func)
 {
 	/*  [prefix .. len .. actual data .. suffix] */
-	void* res = malloc(size+lite_pad*2+sizeof(size_t));
+	void* res;
+	log_assert(size <= SIZE_MAX-(lite_pad*2+sizeof(size_t)));
+	res = malloc(size+lite_pad*2+sizeof(size_t));
 	if(!res) return NULL;
 	memmove(res, lite_pre, lite_pad);
 	memmove(res+lite_pad, &size, sizeof(size_t));
@@ -538,6 +573,7 @@ void *unbound_stat_calloc_lite(size_t nmemb, size_t size, const char* file,
 	if(nmemb != 0 && INT_MAX/nmemb < size)
 		return NULL; /* integer overflow check */
 	req = nmemb * size;
+	log_assert(req <= SIZE_MAX-(lite_pad*2+sizeof(size_t)));
 	res = malloc(req+lite_pad*2+sizeof(size_t));
 	if(!res) return NULL;
 	memmove(res, lite_pre, lite_pad);

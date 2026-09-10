@@ -10,6 +10,7 @@ server:
 	fake-sha1: yes
 	trust-anchor-signaling: no
 	minimal-responses: no
+	iter-scrub-promiscuous: no
 
 stub-zone:
 	name: "."
@@ -219,7 +220,7 @@ STEP 20 TIME_PASSES ELAPSE 3400
 
 ; now the key gets prefetched and has to be verified with the anchor,
 ; not with the key itself.
-; this answer is from cache enyway.
+; this answer is from cache anyway.
 STEP 30 QUERY
 ENTRY_BEGIN
 REPLY RD DO

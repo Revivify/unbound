@@ -137,7 +137,7 @@ test_buffers(sldns_buffer* pkt, sldns_buffer* out)
 	/* compare packets */
 	unit_assert(match_all(sldns_buffer_begin(pkt), sldns_buffer_limit(pkt),
 		sldns_buffer_begin(out), sldns_buffer_limit(out), 1,
-		matches_nolocation));
+		matches_nolocation, 0));
 	return 0;
 }
 
@@ -179,7 +179,7 @@ perf_encode(struct query_info* qi, struct reply_info* rep, uint16_t id,
 	/* encode a couple times */
 	for(i=0; i<max; i++) {
 		ret = reply_info_encode(qi, rep, id, flags, out, timenow,
-			r2, 65535, (int)(edns->bits & EDNS_DO) );
+			r2, 65535, (int)(edns->bits & EDNS_DO), 0);
 		unit_assert(ret != 0); /* udp packets should fit */
 		attach_edns_record(out, edns);
 		regional_free_all(r2);
@@ -342,7 +342,7 @@ testpkt(sldns_buffer* pkt, struct alloc_cache* alloc, sldns_buffer* out,
 	} else if(!check_formerr_gone) {
 		const size_t lim = 512;
 		ret = reply_info_encode(&qi, rep, id, flags, out, timenow,
-			region, 65535, (int)(edns.bits & EDNS_DO) );
+			region, 65535, (int)(edns.bits & EDNS_DO), 0);
 		unit_assert(ret != 0); /* udp packets should fit */
 		attach_edns_record(out, &edns);
 		if(vbmp) printf("inlen %u outlen %u\n", 
@@ -357,7 +357,7 @@ testpkt(sldns_buffer* pkt, struct alloc_cache* alloc, sldns_buffer* out,
 			ret = reply_info_encode(&qi, rep, id, flags, out, 
 				timenow, region, 
 				lim - calc_edns_field_size(&edns),
-				(int)(edns.bits & EDNS_DO));
+				(int)(edns.bits & EDNS_DO), 0);
 			unit_assert(ret != 0); /* should fit, but with TC */
 			attach_edns_record(out, &edns);
 			if( LDNS_QDCOUNT(sldns_buffer_begin(out)) !=
@@ -498,7 +498,11 @@ testfromdrillfile(sldns_buffer* pkt, struct alloc_cache* alloc,
 #define xstr(s) str(s)
 #define str(s) #s
 
+#ifndef __QNX__
 #define SRCDIRSTR xstr(SRCDIR)
+#else /* !__QNX__ */
+#define SRCDIRSTR "."
+#endif /* __QNX__ */
 
 void msgparse_test(void)
 {

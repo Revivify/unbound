@@ -453,7 +453,7 @@ ub_get_event_sys(struct ub_event_base* ub_base, const char** n, const char** s,
 	 * ub_base is guaranteed to exist and to be the default
 	 * event base.
 	 */
-	assert(b);
+	assert(b != NULL);
 	*n = "pluggable-event";
 	*s = event_get_version();
 #  if defined(HAVE_EV_LOOP) || defined(HAVE_EV_DEFAULT_LOOP)
@@ -666,7 +666,8 @@ ub_winsock_tcp_wouldblock(struct ub_event* ev, int eventbits)
 		fptr_ok(ev->vmt != &default_event_vmt ||
 			ev->vmt->winsock_tcp_wouldblock ==
 			my_winsock_tcp_wouldblock);
-		(*ev->vmt->winsock_tcp_wouldblock)(ev, eventbits);
+		if (ev->vmt->winsock_tcp_wouldblock)
+			(*ev->vmt->winsock_tcp_wouldblock)(ev, eventbits);
 	}
 }
 
@@ -687,6 +688,8 @@ void ub_comm_base_now(struct comm_base* cb)
 	if(gettimeofday(tv, NULL) < 0) {
 		log_err("gettimeofday: %s", strerror(errno));
 	}
+#ifndef S_SPLINT_S
 	*tt = tv->tv_sec;
+#endif
 }
 

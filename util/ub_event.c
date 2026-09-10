@@ -1,5 +1,5 @@
 /*
- * util/ub_event.c - directly call libevent (compatability) functions
+ * util/ub_event.c - directly call libevent (compatibility) functions
  *
  * Copyright (c) 2007, NLnet Labs. All rights reserved.
  *
@@ -46,6 +46,13 @@
 #include "util/log.h"
 #include "util/netevent.h"
 #include "util/tube.h"
+#include "daemon/remote.h"
+#ifdef USE_DNSTAP
+#include "dnstap/dtstream.h"
+#endif
+#ifdef UB_ON_WINDOWS
+#include "winrc/win_svc.h"
+#endif
 
 /* We define libevent structures here to hide the libevent stuff. */
 
@@ -95,9 +102,29 @@ UB_EV_BITS_CB(comm_timer_callback)
 UB_EV_BITS_CB(comm_signal_callback)
 UB_EV_BITS_CB(comm_point_local_handle_callback)
 UB_EV_BITS_CB(comm_point_raw_handle_callback)
-UB_EV_BITS_CB(comm_point_http_handle_callback)
 UB_EV_BITS_CB(tube_handle_signal)
 UB_EV_BITS_CB(comm_base_handle_slow_accept)
+UB_EV_BITS_CB(comm_point_http_handle_callback)
+#ifdef HAVE_NGTCP2
+UB_EV_BITS_CB(comm_point_doq_callback)
+#endif
+UB_EV_BITS_CB(fast_reload_service_cb)
+#ifdef USE_DNSTAP
+UB_EV_BITS_CB(dtio_output_cb)
+UB_EV_BITS_CB(dtio_cmd_cb)
+UB_EV_BITS_CB(dtio_reconnect_timeout_cb)
+UB_EV_BITS_CB(dtio_stop_timer_cb)
+UB_EV_BITS_CB(dtio_stop_ev_cb)
+UB_EV_BITS_CB(dtio_tap_callback)
+UB_EV_BITS_CB(dtio_mainfdcallback)
+#endif
+#ifdef HAVE_NGTCP2
+UB_EV_BITS_CB(doq_client_event_cb)
+UB_EV_BITS_CB(doq_client_timer_cb)
+#endif
+#ifdef UB_ON_WINDOWS
+UB_EV_BITS_CB(worker_win_stop_cb)
+#endif
 
 static void (*NATIVE_BITS_CB(void (*cb)(int, short, void*)))(int, short, void*)
 {
@@ -123,6 +150,38 @@ static void (*NATIVE_BITS_CB(void (*cb)(int, short, void*)))(int, short, void*)
 		return my_tube_handle_signal;
 	else if(cb == comm_base_handle_slow_accept)
 		return my_comm_base_handle_slow_accept;
+#ifdef HAVE_NGTCP2
+	else if(cb == comm_point_doq_callback)
+		return my_comm_point_doq_callback;
+#endif
+	else if(cb == fast_reload_service_cb)
+		return my_fast_reload_service_cb;
+#ifdef USE_DNSTAP
+	else if(cb == dtio_output_cb)
+		return my_dtio_output_cb;
+	else if(cb == dtio_cmd_cb)
+		return my_dtio_cmd_cb;
+	else if(cb == dtio_reconnect_timeout_cb)
+		return my_dtio_reconnect_timeout_cb;
+	else if(cb == dtio_stop_timer_cb)
+		return my_dtio_stop_timer_cb;
+	else if(cb == dtio_stop_ev_cb)
+		return my_dtio_stop_ev_cb;
+	else if(cb == dtio_tap_callback)
+		return my_dtio_tap_callback;
+	else if(cb == dtio_mainfdcallback)
+		return my_dtio_mainfdcallback;
+#endif
+#ifdef HAVE_NGTCP2
+	else if(cb == doq_client_event_cb)
+		return my_doq_client_event_cb;
+	else if(cb == doq_client_timer_cb)
+		return my_doq_client_timer_cb;
+#endif
+#ifdef UB_ON_WINDOWS
+	else if(cb == worker_win_stop_cb)
+		return my_worker_win_stop_cb;
+#endif
 	else {
 		log_assert(0); /* this NULL callback pointer should not happen,
 			we should have the necessary routine listed above */
@@ -148,7 +207,7 @@ const char* ub_event_get_version(void)
 	return event_get_version();
 }
 
-#if (defined(HAVE_EV_LOOP) || defined(HAVE_EV_DEFAULT_LOOP)) && defined(EVBACKEND_SELECT)
+#if (defined(HAVE_EV_LOOP) || defined(HAVE_EV_DEFAULT_LOOP)) && defined(EV_FEATURE_BACKENDS)
 static const char* ub_ev_backend2str(int b)
 {
 	switch(b) {
@@ -184,7 +243,7 @@ ub_get_event_sys(struct ub_event_base* base, const char** n, const char** s,
 	*n = "libev";
 	if (!b)
 		b = (struct event_base*)ev_default_loop(EVFLAG_AUTO);
-#    ifdef EVBACKEND_SELECT
+#    ifdef EV_FEATURE_BACKENDS
 	*m = ub_ev_backend2str(ev_backend((struct ev_loop*)b));
 #    else
 	*m = "not obtainable";
@@ -295,11 +354,18 @@ ub_event_new(struct ub_event_base* base, int fd, short bits,
 	if (!ev)
 		return NULL;
 
+#ifndef HAVE_EVENT_ASSIGN
 	event_set(ev, fd, NATIVE_BITS(bits), NATIVE_BITS_CB(cb), arg);
 	if (event_base_set(AS_EVENT_BASE(base), ev) != 0) {
 		free(ev);
 		return NULL;
 	}
+#else
+	if (event_assign(ev, AS_EVENT_BASE(base), fd, bits, cb, arg) != 0) {
+		free(ev);
+		return NULL;
+	}
+#endif
 	return AS_UB_EVENT(ev);
 }
 
@@ -312,11 +378,18 @@ ub_signal_new(struct ub_event_base* base, int fd,
 	if (!ev)
 		return NULL;
 
+#if !HAVE_DECL_EVSIGNAL_ASSIGN
 	signal_set(ev, fd, NATIVE_BITS_CB(cb), arg);
 	if (event_base_set(AS_EVENT_BASE(base), ev) != 0) {
 		free(ev);
 		return NULL;
 	}
+#else
+	if (evsignal_assign(ev, AS_EVENT_BASE(base), fd, cb, arg) != 0) {
+		free(ev);
+		return NULL;
+	}
+#endif
 	return AS_UB_EVENT(ev);
 }
 
@@ -444,7 +517,9 @@ void ub_comm_base_now(struct comm_base* cb)
 	if(gettimeofday(tv, NULL) < 0) {
 		log_err("gettimeofday: %s", strerror(errno));
 	}
+#ifndef S_SPLINT_S
 	*tt = tv->tv_sec;
+#endif
 #endif /* USE_MINI_EVENT */
 }
 

@@ -52,6 +52,9 @@ struct tube;
 struct sldns_buffer;
 struct ub_event_base;
 
+/** store that the logfile has a debug override */
+extern int ctx_logfile_overridden;
+
 /**
  * The context structure
  *
@@ -86,6 +89,12 @@ struct ub_ctx {
 	pid_t bg_pid;
 	/** tid of bg worker thread */
 	ub_thread_type bg_tid;
+	/** pid when pipes are created. This was the process when the
+	 * setup was called. Helps with clean up, so we can tell after a fork
+	 * which side of the fork the delete is on. */
+	pid_t pipe_pid;
+	/** when threaded, the worker that exists in the created thread. */
+	struct libworker* thread_worker;
 
 	/** do threading (instead of forking) for async resolution */
 	int dothread;
@@ -116,6 +125,9 @@ struct ub_ctx {
 
 	/** event base for event oriented interface */
 	struct ub_event_base* event_base;
+	/** true if the event_base is a pluggable base that is malloced
+	 * with a user event base inside, if so, clean up the pluggable alloc*/
+	int event_base_malloced;
 	/** libworker for event based interface */
 	struct libworker* event_worker;
 
@@ -155,6 +167,8 @@ struct ctx_query {
         ub_event_callback_type cb_event;
 	/** for async query, the callback user arg */
 	void* cb_arg;
+	/** for async query the unique info */
+	void* unique_info;
 
 	/** answer message, result from resolver lookup. */
 	uint8_t* msg;
@@ -168,35 +182,6 @@ struct ctx_query {
 	/** result structure, also contains original query, type, class.
 	 * malloced ptr ready to hand to the client. */
 	struct ub_result* res;
-};
-
-/**
- * The error constants
- */
-enum ub_ctx_err {
-	/** no error */
-	UB_NOERROR = 0,
-	/** socket operation. Set to -1, so that if an error from _fd() is
-	 * passed (-1) it gives a socket error. */
-	UB_SOCKET = -1,
-	/** alloc failure */
-	UB_NOMEM = -2,
-	/** syntax error */
-	UB_SYNTAX = -3,
-	/** DNS service failed */
-	UB_SERVFAIL = -4,
-	/** fork() failed */
-	UB_FORKFAIL = -5,
-	/** cfg change after finalize() */
-	UB_AFTERFINAL = -6,
-	/** initialization failed (bad settings) */
-	UB_INITFAIL = -7,
-	/** error in pipe communication with async bg worker */
-	UB_PIPE = -8,
-	/** error reading from file (resolv.conf) */
-	UB_READFILE = -9,
-	/** error async_id does not exist or result already been delivered */
-	UB_NOID = -10
 };
 
 /**
